@@ -232,7 +232,10 @@ def run_kecamatan(args, region, env=None) -> dict:
     plot(model, env, out_dir / f"peta_{stamp}.png")
     print(f"Hasil: {out_dir} (laporan_{stamp}.json, peta_{stamp}.png, riwayat_peringatan.json, peringatan.geojson)")
     return {"region": region.name, "ok": True, "new": len(new_alerts), "pending": len(pending),
-            "hotspots": len(hotspots), "events": len(events)}
+            "hotspots": len(hotspots), "events": len(events),
+            # untuk tampilan web: model & lingkungan lengkap beserta peringatan baru dan riwayat
+            "model": model, "env": env, "new_alerts": new_alerts, "history": history,
+            "out_dir": out_dir, "stamp": stamp}
 
 
 def plot(model, env, path: Path):

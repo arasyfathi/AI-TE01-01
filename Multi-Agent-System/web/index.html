@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Karhutla Kubu Raya</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --kabut: #E8EBE6;      /* latar */
+    --kertas: #F7F8F5;     /* panel */
+    --gambut: #2A241E;     /* teks */
+    --gambut-2: #5E554B;   /* teks sekunder */
+    --garis: #CBCFC6;
+    --api: #E0401F;        /* titik api aktif */
+    --hangus: #7B4A2C;     /* bekas terbakar */
+    --daun: #2F6B45;       /* vegetasi, fokus, tindakan */
+    --tunggu: #D98A1C;     /* menunggu */
+    --r: 6px;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; }
+  body {
+    background: var(--kabut); color: var(--gambut);
+    font: 15px/1.5 "Archivo", system-ui, sans-serif; font-variation-settings: "wdth" 100;
+  }
+  button, input, select { font: inherit; color: inherit; }
+  :focus-visible { outline: 3px solid var(--daun); outline-offset: 2px; }
+  .num { font-variant-numeric: tabular-nums; }
+
+  /* ---------- kepala ---------- */
+  header {
+    display: flex; align-items: end; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    padding: 18px 24px 14px; border-bottom: 1px solid var(--garis);
+  }
+  h1 {
+    margin: 0; font-size: clamp(28px, 4vw, 44px); line-height: 1; letter-spacing: -0.01em;
+    font-variation-settings: "wdth" 125; font-weight: 800;
+  }
+  h1 small {
+    display: block; margin-top: 6px; font-size: 15px; font-weight: 500; letter-spacing: 0;
+    font-variation-settings: "wdth" 100; color: var(--gambut-2);
+  }
+  .status-data { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 14px; color: var(--gambut-2); }
+  .status-data dl { display: flex; gap: 14px; margin: 0; flex-wrap: wrap; }
+  .status-data dt { font-weight: 600; color: var(--gambut); }
+  .status-data dd { margin: 0; }
+  .lama { color: var(--api); font-weight: 600; }
+
+  /* ---------- tata letak ---------- */
+  .app { display: grid; grid-template-columns: 300px minmax(0, 1fr); min-height: calc(100vh - 92px); }
+  aside { border-right: 1px solid var(--garis); padding: 16px; display: flex; flex-direction: column; gap: 14px; }
+  main { display: grid; grid-template-rows: minmax(360px, 52vh) auto; min-width: 0; }
+
+  /* ---------- daftar kecamatan ---------- */
+  aside h2, .panel h2 { margin: 0; font-size: 15px; font-weight: 700; }
+  .kec-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+  .kec {
+    width: 100%; text-align: left; background: none; border: 0; border-radius: var(--r);
+    padding: 7px 8px; cursor: pointer; display: grid; grid-template-columns: 1fr auto; gap: 2px 8px;
+  }
+  .kec:hover { background: var(--kertas); }
+  .kec[aria-pressed="true"] { background: var(--gambut); color: var(--kertas); }
+  .kec .nama { font-weight: 600; }
+  .kec .luas { font-size: 13px; opacity: .75; }
+  .kec .bar { grid-column: 1 / -1; height: 4px; background: var(--garis); border-radius: 2px; overflow: hidden; }
+  .kec .bar span { display: block; height: 100%; background: var(--daun); }
+  .kec[aria-pressed="true"] .bar { background: #5a524a; }
+  .kec[aria-pressed="true"] .bar span { background: #9DC4A8; }
+  .kec .terakhir { grid-column: 1 / -1; font-size: 12px; opacity: .7; }
+
+  .aksi { display: grid; gap: 10px; padding-top: 12px; border-top: 1px solid var(--garis); }
+  .aksi label { font-size: 13px; color: var(--gambut-2); display: grid; gap: 4px; }
+  .aksi input { padding: 7px 8px; border: 1px solid var(--garis); border-radius: var(--r); background: var(--kertas); }
+  .tombol {
+    border: 0; border-radius: var(--r); padding: 11px 14px; cursor: pointer; font-weight: 700;
+    background: var(--daun); color: #fff;
+  }
+  .tombol:disabled { opacity: .55; cursor: progress; }
+  .tombol-kecil {
+    border: 1px solid var(--garis); background: var(--kertas); border-radius: var(--r);
+    padding: 5px 10px; cursor: pointer; font-size: 13px;
+  }
+  .log {
+    margin: 0; padding: 10px; background: var(--gambut); color: #E9E2D8; border-radius: var(--r);
+    font: 12px/1.45 ui-monospace, Consolas, monospace; max-height: 220px; overflow: auto; white-space: pre-wrap;
+  }
+  .pesan-galat { color: var(--api); font-weight: 600; font-size: 14px; }
+
+  /* ---------- peta ---------- */
+  #peta { width: 100%; height: 100%; background: #c9cfc4; }
+  .peta-wrap { position: relative; border-bottom: 1px solid var(--garis); }
+  .peta-kosong { position: absolute; inset: 0; display: grid; place-items: center; text-align: center; padding: 24px; color: var(--gambut-2); }
+  .legenda { background: rgba(247,248,245,.94); padding: 8px 10px; border-radius: var(--r); font-size: 13px; line-height: 1.6; }
+  .legenda i { display: inline-block; width: 12px; height: 12px; margin-right: 6px; vertical-align: -1px; border-radius: 2px; }
+
+  /* ---------- jalur agen ---------- */
+  .hasil { padding: 16px 24px 32px; min-width: 0; }
+  .judul-hasil { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 4px; }
+  .judul-hasil h2 { margin: 0; font-size: 22px; font-variation-settings: "wdth" 112; }
+  .kalimat { margin: 0 0 14px; max-width: 78ch; color: var(--gambut-2); }
+  .kalimat b { color: var(--gambut); }
+  .jalur { list-style: none; margin: 0 0 16px; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 0; counter-reset: agen; }
+  .jalur li { position: relative; }
+  .jalur li + li::before {
+    content: ""; position: absolute; left: -2px; top: 26px; width: 4px; height: 2px; background: var(--gambut-2);
+  }
+  .agen {
+    width: calc(100% - 6px); height: 100%; text-align: left; border: 1px solid var(--garis); background: var(--kertas);
+    border-radius: var(--r); padding: 8px 10px; cursor: pointer; display: grid; gap: 2px; counter-increment: agen;
+  }
+  .agen .no::before { content: counter(agen); }
+  .agen .no { font-size: 12px; color: var(--gambut-2); font-variant-numeric: tabular-nums; }
+  .agen .nm { font-weight: 700; line-height: 1.2; }
+  .agen .io { font-size: 12px; color: var(--gambut-2); }
+  .agen[aria-selected="true"] { border-color: var(--gambut); background: var(--gambut); color: var(--kertas); }
+  .agen[aria-selected="true"] .no, .agen[aria-selected="true"] .io { color: #CFC6BB; }
+  .jalur li.komunikasi .agen .no::before { content: "↔"; }
+  .jalur li.komunikasi .agen { counter-increment: none; }
+
+  .panel { background: var(--kertas); border: 1px solid var(--garis); border-radius: var(--r); padding: 14px 16px; }
+  .panel p { margin: 4px 0 12px; max-width: 78ch; color: var(--gambut-2); font-size: 14px; }
+  .filter { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; }
+  .filter button[aria-pressed="true"] { background: var(--gambut); color: var(--kertas); border-color: var(--gambut); }
+  .tabel-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 14px; }
+  th, td { text-align: left; padding: 6px 10px 6px 0; border-bottom: 1px solid var(--garis); vertical-align: top; }
+  td { white-space: nowrap; }
+  th { font-weight: 600; color: var(--gambut-2); white-space: nowrap; }
+  td.r, th.r { text-align: right; }
+  tr.klik { cursor: pointer; }
+  tr.klik:hover td { background: #EEF0EA; }
+  .pr { font-weight: 700; }
+  .pr-DARURAT { color: var(--api); }
+  .pr-TINGGI { color: var(--hangus); }
+  .baru { font-size: 12px; font-weight: 700; color: var(--daun); }
+  .st-confirmed { color: var(--hangus); font-weight: 600; }
+  .st-pending { color: var(--tunggu); font-weight: 600; }
+  .st-dismissed { color: var(--gambut-2); }
+  .kosong { padding: 18px 0; color: var(--gambut-2); }
+
+  @media (max-width: 1100px) { .jalur { grid-template-columns: repeat(4, minmax(0, 1fr)); row-gap: 6px; } .jalur li + li::before { display: none; } }
+  @media (max-width: 860px) {
+    .app { grid-template-columns: 1fr; }
+    aside { border-right: 0; border-bottom: 1px solid var(--garis); }
+    .kec-list { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+    main { grid-template-rows: 60vh auto; }
+    .hasil { padding: 16px; }
+    .jalur { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; transition: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Karhutla Kubu Raya<small>Pemantauan kebakaran hutan dan lahan setiap dua minggu oleh enam agen</small></h1>
+  <div class="status-data">
+    <div id="status-isi">Project GEE <span id="project">-</span></div>
+    <button class="tombol-kecil" id="cek-status" type="button">Cek kesegaran data</button>
+  </div>
+</header>
+
+<div class="app">
+  <aside>
+    <h2 id="judul-kec">Pilih kecamatan</h2>
+    <ul class="kec-list" id="kec-list" aria-labelledby="judul-kec"></ul>
+    <div class="aksi">
+      <label>Anggap hari ini tanggal (kosongkan untuk data terbaru)
+        <input type="date" id="tanggal">
+      </label>
+      <button class="tombol" id="pantau" type="button" disabled>Pilih kecamatan dulu</button>
+      <p class="pesan-galat" id="galat" role="alert" hidden></p>
+      <pre class="log" id="log" aria-live="polite" hidden></pre>
+    </div>
+  </aside>
+
+  <main>
+    <div class="peta-wrap">
+      <div id="peta" role="region" aria-label="Peta kecamatan, titik api, dan bekas terbakar"></div>
+    </div>
+    <section class="hasil" id="hasil" aria-live="polite">
+      <div class="kosong" id="belum">Pilih kecamatan di kiri atau di peta, lalu tekan tombol pantau. Hasil pemantauan terakhir langsung ditampilkan bila sudah ada.</div>
+    </section>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+const AGEN = [
+  { key: "ingestion", nama: "Pengunduh", role: "ingestion" },
+  { key: "hotspot", nama: "Titik Api", role: "hotspot" },
+  { key: "detection", nama: "Deteksi Perubahan", role: "detection" },
+  { key: "validation", nama: "Validasi", role: "validation" },
+  { key: "incident", nama: "Pengelompokan", role: "incident" },
+  { key: "notification", nama: "Notifikasi", role: "notification" },
+];
+const NAMA_PERAN = Object.fromEntries(AGEN.map(a => [a.role, a.nama]));
+const STATUS = { confirmed: "terkonfirmasi", dismissed: "ditolak", pending: "menunggu", uncertain: "perlu tinjauan" };
+const PENYEBAB = { fire: "kebakaran", "bukan kebakaran": "tanpa bukti api", logging: "tanpa bukti api", cloud: "awan", inconclusive: "belum pasti" };
+const JENIS = { hotspot: "titik api", fire: "bekas terbakar", logging: "tebang liar", uncertain: "perlu tinjauan" };
+
+const state = { kec: [], pilih: null, hasil: null, tab: "notification", filterDeteksi: "semua", job: null, logN: 0 };
+const $ = s => document.querySelector(s);
+const fmt = (v, d = 0) => v == null ? "-" : Number(v).toLocaleString("id-ID", { maximumFractionDigits: d, minimumFractionDigits: d });
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const tgl = iso => iso ? new Date(iso).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" }) : "";
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  const body = await r.json().catch(() => ({}));
+  if (!r.ok) throw Object.assign(new Error(body.error || r.statusText), { status: r.status, body });
+  return body;
+}
+
+// ------------------------------------------------------------------ peta
+let peta = null, lapisWilayah = null, lapis = {};
+function siapkanPeta(geojson) {
+  if (typeof L === "undefined") {
+    $(".peta-wrap").insertAdjacentHTML("beforeend",
+      '<div class="peta-kosong">Peta tidak bisa dimuat karena pustaka Leaflet tidak terunduh. Periksa koneksi internet; tabel hasil tetap bisa dipakai.</div>');
+    return;
+  }
+  peta = L.map("peta", { zoomControl: true, attributionControl: true });
+  const citra = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", {
+    maxZoom: 18, attribution: "Citra &copy; Esri, Maxar, Earthstar Geographics",
+  }).addTo(peta);
+  const jalan = L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19, attribution: "&copy; kontributor OpenStreetMap",
+  });
+  lapisWilayah = L.geoJSON(geojson, {
+    style: f => gayaWilayah(f.properties.name),
+    onEachFeature: (f, layer) => {
+      layer.bindTooltip(f.properties.name, { sticky: true });
+      layer.on("click", () => pilihKecamatan(f.properties.name));
+    },
+  }).addTo(peta);
+  peta.fitBounds(lapisWilayah.getBounds(), { padding: [12, 12] });
+  for (const k of ["titik", "bekas", "tunggu", "tolak"]) lapis[k] = L.layerGroup();
+  lapis.titik.addTo(peta); lapis.bekas.addTo(peta); lapis.tunggu.addTo(peta);
+  L.control.layers({ "Citra satelit": citra, "Peta jalan": jalan }, {
+    "Titik api": lapis.titik, "Bekas terbakar": lapis.bekas, "Menunggu periode berikutnya": lapis.tunggu,
+    "Ditolak (tanpa bukti api)": lapis.tolak,
+  }, { collapsed: true }).addTo(peta);
+  const legenda = L.control({ position: "bottomleft" });
+  legenda.onAdd = () => {
+    const d = L.DomUtil.create("div", "legenda");
+    d.innerHTML = '<i style="background:#E0401F"></i>Titik api VIIRS<br><i style="background:#7B4A2C;outline:2px solid #FFB38A"></i>Bekas terbakar terkonfirmasi<br><i style="background:#D98A1C;border-radius:50%"></i>Menunggu periode berikutnya';
+    return d;
+  };
+  legenda.addTo(peta);
+}
+function gayaWilayah(nama) {
+  const aktif = state.pilih === nama;
+  return { color: "#ffffff", weight: aktif ? 3 : 1, opacity: aktif ? 1 : .7, fillColor: "#ffffff", fillOpacity: aktif ? 0 : .06 };
+}
+function sorotWilayah() {
+  if (!lapisWilayah) return;
+  lapisWilayah.setStyle(f => gayaWilayah(f.properties.name));
+  lapisWilayah.eachLayer(l => { if (l.feature.properties.name === state.pilih) { l.bringToFront(); peta.fitBounds(l.getBounds(), { padding: [16, 16] }); } });
+}
+function gambarHasil(h) {
+  if (!peta) return;
+  Object.values(lapis).forEach(g => g.clearLayers());
+  const sel = h.agen.hotspot.ukuran_sel_deg / 2;
+  for (const k of h.agen.hotspot.klaster) {
+    const kotak = k.sel.map(([la, lo]) => L.rectangle([[la - sel, lo - sel], [la + sel, lo + sel]], { color: "#E0401F", weight: 0, fillOpacity: .6 }));
+    const g = L.featureGroup(kotak).bindPopup(`<b>Titik api ${esc(k.awal)} s.d. ${esc(k.akhir)}</b><br>${fmt(k.deteksi)} deteksi, sekitar ${fmt(k.luas_ha)} ha`);
+    g.addTo(lapis.titik);
+  }
+  for (const k of h.agen.incident.kejadian) {
+    if (k.jenis !== "fire") continue;
+    L.polygon(k.tepi, { color: "#FFB38A", weight: 2, fillColor: "#7B4A2C", fillOpacity: .45 })
+      .bindPopup(`<b>Bekas terbakar ${fmt(k.luas_ha, 1)} ha</b><br>${k.bagian} bagian, periode ${esc(k.periode)}`).addTo(lapis.bekas);
+  }
+  for (const c of h.agen.detection.kasus) {
+    if (c.status === "pending")
+      L.circleMarker([c.lat, c.lon], { radius: 7, color: "#D98A1C", weight: 2, fillOpacity: .15 })
+        .bindPopup(`<b>Menunggu</b><br>NDVI turun ${fmt(c.ndvi_turun, 2)}, ${fmt(c.luas_ha, 1)} ha`).addTo(lapis.tunggu);
+    if (c.status === "dismissed")
+      L.circleMarker([c.lat, c.lon], { radius: 4, color: "#ffffff", weight: 1, fillOpacity: .3 })
+        .bindPopup(`<b>Ditolak</b><br>${esc(c.catatan || "")}`).addTo(lapis.tolak);
+  }
+}
+function terbangKe(lat, lon) { if (peta) peta.flyTo([lat, lon], 14, { duration: matchMedia("(prefers-reduced-motion: reduce)").matches ? 0 : .8 }); }
+
+// --------------------------------------------------------- daftar kecamatan
+function gambarDaftar() {
+  const maks = Math.max(...state.kec.map(k => k.area_km2));
+  $("#kec-list").innerHTML = state.kec.map(k => `
+    <li><button class="kec" type="button" data-nama="${esc(k.name)}" aria-pressed="${state.pilih === k.name}">
+      <span class="nama">${esc(k.name)}</span><span class="luas num">${fmt(k.area_km2)} km²</span>
+      <span class="bar" aria-hidden="true"><span style="width:${(100 * k.area_km2 / maks).toFixed(1)}%"></span></span>
+      <span class="terakhir">${k.terakhir ? "Terakhir dipantau " + tgl(k.terakhir) : "Belum pernah dipantau"}</span>
+    </button></li>`).join("");
+  document.querySelectorAll(".kec").forEach(b => b.addEventListener("click", () => pilihKecamatan(b.dataset.nama)));
+}
+async function pilihKecamatan(nama) {
+  state.pilih = nama;
+  gambarDaftar(); sorotWilayah();
+  const tombol = $("#pantau");
+  tombol.disabled = !!state.job; tombol.textContent = state.job ? "Pemantauan sedang berjalan" : `Pantau ${nama}`;
+  const k = state.kec.find(x => x.name === nama);
+  if (k && k.terakhir) {
+    try { tampilkan(await api(`/api/hasil/${k.slug}`)); } catch (e) { kosongkan(nama); }
+  } else kosongkan(nama);
+}
+function kosongkan(nama) {
+  state.hasil = null;
+  Object.values(lapis).forEach(g => g.clearLayers && g.clearLayers());
+  $("#hasil").innerHTML = `<div class="kosong">${esc(nama)} belum pernah dipantau. Tekan "Pantau ${esc(nama)}" untuk menjalankan keenam agen. Putaran pertama mengunduh citra dari Google Earth Engine dan bisa memakan beberapa menit; putaran berikutnya memakai cache.</div>`;
+}
+
+// ------------------------------------------------------------ pemantauan
+async function mulai() {
+  const nama = state.pilih; if (!nama) return;
+  $("#galat").hidden = true;
+  const log = $("#log"); log.hidden = false; log.textContent = `Memulai pemantauan ${nama}...\n`;
+  $("#pantau").disabled = true; $("#pantau").textContent = "Pemantauan sedang berjalan";
+  try {
+    const r = await api("/api/pantau", { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kecamatan: nama, end_date: $("#tanggal").value || null }) });
+    state.job = r.job; state.logN = 0; ikuti();
+  } catch (e) {
+    galat(e.status === 409 ? "Pemantauan lain masih berjalan. Tunggu sampai selesai." : e.message);
+  }
+}
+async function ikuti() {
+  try {
+    const j = await api(`/api/job/${state.job}?sejak=${state.logN}`);
+    if (j.log.length) { const log = $("#log"); log.textContent += j.log.join("\n") + "\n"; log.scrollTop = log.scrollHeight; }
+    state.logN = j.jumlah_log;
+    if (j.status === "berjalan") return setTimeout(ikuti, 1000);
+    state.job = null;
+    if (j.status === "gagal") return galat(`Pemantauan ${j.kecamatan} gagal: ${j.error}`);
+    const daftar = await api("/api/kecamatan"); state.kec = daftar.kecamatan;
+    await pilihKecamatan(j.kecamatan);
+  } catch (e) { state.job = null; galat(e.message); }
+}
+function galat(pesan) {
+  const g = $("#galat"); g.textContent = pesan; g.hidden = false;
+  $("#pantau").disabled = !state.pilih; $("#pantau").textContent = state.pilih ? `Pantau ${state.pilih}` : "Pilih kecamatan dulu";
+}
+
+// ----------------------------------------------------------- tampilan hasil
+function ioAgen(h, role) {
+  let masuk = 0, keluar = 0;
+  for (const m of h.pesan) { if (m.ke === role) masuk += m.jumlah; if (m.dari === role) keluar += m.jumlah; }
+  return `menerima ${masuk}, mengirim ${keluar} pesan`;
+}
+function tampilkan(h) {
+  state.hasil = h;
+  const r = h.ringkasan;
+  const tombolAgen = AGEN.map(a => `<li><button class="agen" type="button" role="tab" data-tab="${a.key}" aria-selected="${state.tab === a.key}">
+      <span class="no"></span><span class="nm">${a.nama}</span><span class="io num">${ioAgen(h, a.role)}</span></button></li>`).join("");
+  $("#hasil").innerHTML = `
+    <div class="judul-hasil"><h2>${esc(h.kecamatan)}</h2>
+      <span>Dipantau ${tgl(h.dijalankan)}. <a href="${esc(h.peta_png)}" target="_blank" rel="noopener">Buka peta PNG</a></span></div>
+    <p class="kalimat">Periode ${esc(h.periode[0])} sampai ${esc(h.periode[h.periode.length - 1])}, titik api sampai ${esc(h.titik_api_sampai)}.
+      Putaran ini menghasilkan <b class="num">${r.titik_api_baru}</b> peringatan titik api baru dan <b class="num">${r.bekas_terbakar_baru}</b> bekas terbakar baru;
+      <b class="num">${r.menunggu}</b> wilayah menunggu periode berikutnya. Agen-agen bertukar <span class="num">${fmt(r.pesan)}</span> pesan.</p>
+    <ol class="jalur" role="tablist" aria-label="Keluaran tiap agen">${tombolAgen}
+      <li class="komunikasi"><button class="agen" type="button" role="tab" data-tab="pesan" aria-selected="${state.tab === "pesan"}">
+        <span class="no"></span><span class="nm">Pesan antaragen</span><span class="io num">${h.pesan.length} jenis percakapan</span></button></li></ol>
+    <div class="panel" id="panel" role="tabpanel"></div>`;
+  document.querySelectorAll(".agen").forEach(b => b.addEventListener("click", () => { state.tab = b.dataset.tab; tampilkanTab(); }));
+  tampilkanTab(); gambarHasil(h);
+}
+function tabel(kolom, baris, opsi = {}) {
+  if (!baris.length) return `<p class="kosong">${opsi.kosong || "Tidak ada data."}</p>`;
+  const head = kolom.map(k => `<th class="${k.r ? "r" : ""}">${k.t}</th>`).join("");
+  const body = baris.map((b, i) => `<tr class="${b.lat != null ? "klik" : ""}" data-i="${i}" ${b.lat != null ? 'tabindex="0"' : ""}>${
+    kolom.map(k => `<td class="${k.r ? "r num" : ""}">${k.f(b)}</td>`).join("")}</tr>`).join("");
+  return `<div class="tabel-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+function hubungkanBaris(baris) {
+  document.querySelectorAll("#panel tr.klik").forEach(tr => {
+    const b = baris[+tr.dataset.i];
+    const go = () => terbangKe(b.lat, b.lon);
+    tr.addEventListener("click", go);
+    tr.addEventListener("keydown", e => { if (e.key === "Enter") go(); });
+  });
+}
+const lokasi = b => `${fmt(b.lat, 4)}, ${fmt(b.lon, 4)}`;
+const pr = p => p ? `<span class="pr pr-${esc(p)}">${esc(p)}</span>` : "-";
+const baru = b => b ? '<span class="baru">baru</span>' : "";
+
+function tampilkanTab() {
+  const h = state.hasil, a = h.agen, panel = $("#panel");
+  document.querySelectorAll(".agen").forEach(b => b.setAttribute("aria-selected", b.dataset.tab === state.tab));
+  let html = "", baris = [];
+  switch (state.tab) {
+    case "ingestion":
+      baris = a.ingestion.periode;
+      html = `<h2>Agen Pengunduh</h2><p>Mengambil komposit NDVI Sentinel-2 bebas awan dan titik api VIIRS untuk tiap periode dua minggu. Dua periode pertama menjadi acuan pembanding.</p>` +
+        tabel([{ t: "Periode", f: b => esc(b.periode) }, { t: "Peran", f: b => b.peran },
+               { t: "Terunduh", f: b => b.terunduh ? "ya" : "gagal" },
+               { t: "Lahan bebas awan (ha)", r: 1, f: b => fmt(b.lahan_bebas_awan_ha) },
+               { t: "Titik api (ha)", r: 1, f: b => b.titik_api_ha == null ? "tak ada data" : fmt(b.titik_api_ha) }], baris) +
+        (a.ingestion.gagal.length ? `<p class="pesan-galat">Permintaan gagal: ${esc(a.ingestion.gagal[0])}</p>` : "");
+      break;
+    case "hotspot":
+      baris = a.hotspot.klaster;
+      html = `<h2>Agen Titik Api</h2><p>Mengelompokkan titik api VIIRS yang bersebelahan menjadi klaster dan mengirim peringatan dini, tanpa menunggu citra bebas awan. Klik baris untuk melihat lokasinya.</p>` +
+        tabel([{ t: "Awal", f: b => esc(b.awal) }, { t: "Akhir", f: b => esc(b.akhir) }, { t: "Deteksi", r: 1, f: b => fmt(b.deteksi) },
+               { t: "Luas (ha)", r: 1, f: b => fmt(b.luas_ha) }, { t: "FRP maks. (MW)", r: 1, f: b => fmt(b.frp_maks, 1) },
+               { t: "Prioritas", f: b => pr(b.prioritas) }, { t: "", f: b => baru(b.baru) }, { t: "Lokasi", f: lokasi }], baris,
+              { kosong: "Tidak ada titik api pada keempat periode." });
+      break;
+    case "detection": {
+      const semua = a.detection.kasus;
+      baris = state.filterDeteksi === "semua" ? semua : semua.filter(c => c.status === state.filterDeteksi);
+      const n = s => semua.filter(c => c.status === s).length;
+      const f = (k, t) => `<button class="tombol-kecil" type="button" data-f="${k}" aria-pressed="${state.filterDeteksi === k}">${t}</button>`;
+      html = `<h2>Agen Deteksi Perubahan</h2><p>Membandingkan NDVI tiap periode dengan pengamatan bersih sebelumnya dan mencari wilayah yang turun drastis. Wilayah tanpa bukti api ditolak.</p>
+        <div class="filter">${f("semua", `Semua (${semua.length})`)}${f("confirmed", `Terkonfirmasi (${n("confirmed")})`)}${f("dismissed", `Ditolak (${n("dismissed")})`)}${f("pending", `Menunggu (${n("pending")})`)}</div>` +
+        tabel([{ t: "Periode", f: b => esc(b.periode) }, { t: "Status", f: b => `<span class="st-${b.status}">${STATUS[b.status] || b.status}</span>` },
+               { t: "Penyebab", f: b => esc(PENYEBAB[b.penyebab] || b.penyebab || "-") }, { t: "Luas (ha)", r: 1, f: b => fmt(b.luas_ha, 1) },
+               { t: "NDVI turun", r: 1, f: b => fmt(b.ndvi_turun, 2) },
+               { t: "Cek menetap", f: b => b.jalur_cepat ? "jalur cepat kebakaran" : (b.cek_menetap.map(v => fmt(v, 2)).join(" / ") || "-") },
+               { t: "Lokasi", f: lokasi }], baris, { kosong: "Tidak ada wilayah dengan status ini." });
+      break;
+    }
+    case "validation":
+      baris = a.validation.vonis;
+      html = `<h2>Agen Validasi</h2><p>Untuk setiap wilayah dari Agen Deteksi, memeriksa apakah ada titik api di sekitarnya dan mengusulkan vonis. Suara kuat berarti didukung bukti api langsung. Kesepakatan: ${a.validation.sepakat} dikonfirmasi bersama, ${a.validation.batal} dibatalkan bersama.</p>` +
+        tabel([{ t: "Kasus", f: b => esc(b.kasus) }, { t: "Periode", f: b => esc(b.periode) }, { t: "Ronde", r: 1, f: b => b.ronde },
+               { t: "Vonis", f: b => esc(PENYEBAB[b.vonis] || b.vonis) }, { t: "Suara", f: b => b.kuat ? "kuat" : "lemah" },
+               { t: "Porsi area berapi", r: 1, f: b => b.porsi_api == null ? "-" : fmt(100 * b.porsi_api) + "%" },
+               { t: "Keyakinan", r: 1, f: b => fmt(b.keyakinan, 2) }], baris, { kosong: "Tidak ada permintaan validasi." });
+      break;
+    case "incident":
+      baris = a.incident.kejadian;
+      html = `<h2>Agen Pengelompokan Kejadian</h2><p>Menyatukan bagian bekas terbakar yang berjarak kurang dari 500 m menjadi satu kejadian dan menautkannya ke klaster titik api penyebabnya.</p>` +
+        tabel([{ t: "Kejadian", f: b => esc(b.id) }, { t: "Periode", f: b => esc(b.periode) }, { t: "Luas (ha)", r: 1, f: b => fmt(b.luas_ha, 1) },
+               { t: "Bagian", r: 1, f: b => b.bagian }, { t: "Klaster titik api", r: 1, f: b => b.klaster_titik_api.length },
+               { t: "Prioritas", f: b => pr(b.prioritas) }, { t: "", f: b => baru(b.baru) }, { t: "Lokasi", f: lokasi }], baris,
+              { kosong: "Belum ada bekas terbakar yang terkonfirmasi." });
+      break;
+    case "notification":
+      baris = a.notification.peringatan;
+      html = `<h2>Agen Notifikasi</h2><p>Peringatan yang dikirim ke Satgas Karhutla / BPBD pada putaran ini. Yang bertanda baru belum pernah dikirim; riwayat kecamatan ini berisi ${a.notification.riwayat} peringatan.</p>` +
+        tabel([{ t: "Jenis", f: b => esc(JENIS[b.jenis] || b.jenis) }, { t: "Prioritas", f: b => pr(b.prioritas) },
+               { t: "Waktu", f: b => b.awal ? `${esc(b.awal)} s.d. ${esc(b.akhir)}` : esc(b.periode) },
+               { t: "Luas (ha)", r: 1, f: b => fmt(b.luas_ha, 1) }, { t: "Kanal", f: b => esc(b.kanal) },
+               { t: "", f: b => baru(b.baru) }, { t: "Lokasi", f: lokasi }], baris, { kosong: "Tidak ada peringatan pada putaran ini." });
+      break;
+    case "pesan":
+      baris = h.pesan;
+      html = `<h2>Pesan antaragen</h2><p>Semua percakapan selama putaran ini, dikelompokkan menurut pengirim, penerima, dan jenis tindak tutur (FIPA-ACL).</p>` +
+        tabel([{ t: "Dari", f: b => esc(NAMA_PERAN[b.dari] || b.dari) }, { t: "Ke", f: b => esc(NAMA_PERAN[b.ke] || b.ke) },
+               { t: "Tindak tutur", f: b => esc(b.performative) }, { t: "Topik", f: b => esc(b.topik) }, { t: "Jumlah", r: 1, f: b => fmt(b.jumlah) }], baris);
+      break;
+  }
+  panel.innerHTML = html;
+  panel.querySelectorAll("[data-f]").forEach(b => b.addEventListener("click", () => { state.filterDeteksi = b.dataset.f; tampilkanTab(); }));
+  hubungkanBaris(baris);
+}
+
+// ----------------------------------------------------------------- status data
+async function cekStatus() {
+  const isi = $("#status-isi"); isi.textContent = "Menghubungi Google Earth Engine...";
+  try {
+    const s = await api("/api/status");
+    const label = { "COPERNICUS/S2_SR_HARMONIZED": "Sentinel-2", "GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED": "Masker awan" };
+    const hari = d => Math.round((Date.now() - new Date(d)) / 864e5);
+    isi.innerHTML = "<dl>" + Object.entries(s.sumber).map(([id, d]) => {
+      const nama = label[id] || "Titik api " + id.split("/").slice(-2, -1)[0].replace("_VIIRS", "");
+      const lama = d && !d.startsWith("GAGAL") && hari(d) > 10;
+      return `<div><dt>${esc(nama)}</dt><dd class="${lama ? "lama" : ""}">${d ? esc(d) : "tidak ada data"}</dd></div>`;
+    }).join("") + "</dl>";
+  } catch (e) { isi.innerHTML = `<span class="lama">Tidak bisa mengecek: ${esc(e.message)}</span>`; }
+}
+
+// ----------------------------------------------------------------- mulai
+(async function () {
+  $("#pantau").addEventListener("click", mulai);
+  $("#cek-status").addEventListener("click", cekStatus);
+  try {
+    const [daftar, geo] = await Promise.all([api("/api/kecamatan"), fetch("/api/wilayah.geojson").then(r => r.json())]);
+    state.kec = daftar.kecamatan; $("#project").textContent = daftar.project;
+    siapkanPeta(geo); gambarDaftar();
+    const terakhir = state.kec.filter(k => k.terakhir).sort((a, b) => b.terakhir.localeCompare(a.terakhir))[0];
+    if (terakhir) pilihKecamatan(terakhir.name);
+  } catch (e) { galat("Server tidak menjawab. Pastikan jendela web_pantau.py masih terbuka. (" + e.message + ")"); }
+})();
+</script>
+</body>
+</html>

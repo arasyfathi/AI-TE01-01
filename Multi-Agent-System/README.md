@@ -98,7 +98,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 61 pengujian
+python -m pytest -q tests                             # 65 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
@@ -122,6 +122,8 @@ Multi-Agent-System/
 ├── run_simulation.py    # simulasi sintetis
 ├── run_gee.py           # replay pada data nyata GEE (--check untuk uji koneksi)
 ├── run_pantau.py        # pemantauan 2 mingguan per kecamatan (Sentinel-2 + VIIRS)
+├── web_pantau.py        # aplikasi web lokal (server) untuk pemantauan per kecamatan
+├── web/index.html       # halaman web: peta, daftar kecamatan, keluaran tiap agen
 ├── data/                # batas kecamatan Kabupaten Kubu Raya (GeoJSON)
 ├── requirements.txt
 └── requirements-gee.txt # tambahan untuk GEE
@@ -295,7 +297,32 @@ menunggu), `peta_<periode>.png` (NDVI acuan vs terbaru dengan penanda), `riwayat
 - Uji otomatis memakai data periode tiruan dan objek `ee` palsu; panggilan ke server GEE sungguhan belum
   teruji dari lingkungan pengembangan.
 
-## 10. Ide pengembangan berikutnya
+## 10. 🌐 Halaman web pemantauan
+
+Aplikasi web lokal untuk memilih kecamatan, menjalankan pemantauan, dan melihat keluaran setiap agen.
+Project ID GEE sudah tertanam di `web_pantau.py` (`PROJECT_ID`; bisa ditimpa dengan variabel `EE_PROJECT`).
+
+```bash
+python web_pantau.py          # lalu buka http://127.0.0.1:8765 (biasanya terbuka otomatis)
+```
+Di Windows: klik ganda `Buka_Web_Pantau.bat` di root repositori. Biarkan jendela konsolnya terbuka selama
+memakai halaman.
+
+- **Daftar kecamatan dan peta**: pilih kecamatan dari daftar (dengan batang luas relatif) atau klik poligonnya
+  di peta citra satelit. Hasil pemantauan terakhir langsung ditampilkan bila sudah ada.
+- **Pantau**: menjalankan keenam agen untuk kecamatan itu di latar belakang; log konsol tampil di halaman.
+  Isi "Anggap hari ini tanggal" untuk uji historis.
+- **Jalur agen**: Pengunduh, Titik Api, Deteksi Perubahan, Validasi, Pengelompokan, dan Notifikasi, masing-masing
+  dengan jumlah pesan yang diterima/dikirim. Klik untuk melihat tabel keluarannya; klik baris tabel untuk
+  terbang ke lokasinya di peta. Tab "Pesan antaragen" merangkum seluruh percakapan FIPA-ACL.
+- **Peta**: titik api VIIRS (kotak merah per sel ~375 m), tepi bekas terbakar, wilayah yang menunggu, dan
+  (opsional) wilayah yang ditolak. Pilih citra satelit atau peta jalan dari kontrol lapisan.
+- **Cek kesegaran data**: tanggal citra terbaru tiap sumber di GEE.
+
+Server hanya mendengarkan `127.0.0.1` dan hanya satu pemantauan yang berjalan pada satu waktu. Peta dan huruf
+dimuat dari internet (Leaflet di cdnjs, citra Esri, Google Fonts); tanpa internet tabel tetap berfungsi.
+
+## 11. Ide pengembangan berikutnya
 
 - **Agen Masker Awan** khusus yang memakai band QA citra, sehingga lebih sedikit kasus awan yang masuk validasi.
 - **Agen Validasi kedua** berbasis radar (Sentinel-1) yang bisa melihat menembus awan, untuk menyelesaikan kasus *uncertain*.
