@@ -199,8 +199,25 @@ Aturan yang diperbaiki:
   pulih, sehingga kasus seperti itu ditolak dan tidak dilempar ke analis.
 - **Batas tunggu citra bersih** untuk data nyata dinaikkan menjadi 20 hari (`--max-wait`).
 
-Perilaku pada data simulasi tidak berubah. Replay di area yang sama perlu dijalankan ulang untuk melihat hasilnya
-pada data nyata. Ringkasan `run_gee.py` kini mencetak alasan keputusan tiap kasus.
+Perilaku pada data simulasi tidak berubah. Ringkasan `run_gee.py` kini mencetak alasan keputusan tiap kasus.
+
+**Hasil replay ulang di area dan periode yang sama:**
+
+| | Sebelum perbaikan | Sesudah perbaikan |
+| :--- | ---: | ---: |
+| Kasus dibuka | 7 | 7 |
+| Peringatan kebakaran (DARURAT) | 0 | **4** |
+| Alarm palsu ditolak | 0 | **3** |
+| Perlu tinjauan manual | 6 | **0** |
+
+Keempat kebakaran (3, 5, 24 September dan 6 Oktober 2023) terkonfirmasi lewat jalur cepat dengan titik api 17–100%
+di lokasi penurunan NDVI. Ketiga kasus lain ditolak karena NDVI terbukti pulih (penurunan -0,01 sampai 0,03).
+
+Catatan kejujuran evaluasi: titik api MODIS dipakai sebagai bukti oleh agen Validasi, jadi kecocokan dengan
+daftar "hari MODIS mendeteksi titik api" bukan validasi independen, dan recall pada data nyata belum bisa
+dihitung. Pembanding independen yang bisa dipakai berikutnya: produk area terbakar `MODIS/061/MCD64A1`
+atau titik api VIIRS.
+
 
 **Status pengujian**: logika adapter, penanganan data bolong, cache, percobaan ulang, dan CLI diuji dengan GEE
 tiruan (`tests/test_gee_adapter.py`). Panggilan ke server GEE sungguhan (ekspresi citra dan `computePixels`)
