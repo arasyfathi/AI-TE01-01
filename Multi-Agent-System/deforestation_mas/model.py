@@ -34,9 +34,13 @@ class ForestMonitoringModel(mesa.Model):
         detector_kwargs: dict | None = None,
         validator_kwargs: dict | None = None,
         verbose: bool = False,
+        env=None,
     ):
+        """``env``: lingkungan data apa pun yang memenuhi antarmuka ``ForestEnvironment``
+        (misalnya ``GEEEnvironment``). Bila kosong, dipakai lingkungan sintetis."""
         super().__init__(rng=seed)
-        self.env = ForestEnvironment(size=size, seed=seed, **(env_kwargs or {}))
+        self.env = env if env is not None else ForestEnvironment(size=size, seed=seed, **(env_kwargs or {}))
+        size = self.env.size
         self.bus = MessageBus()
         self.archive: dict = {}  # citra yang sudah diunduh ("data lake")
         self.cases: dict = {}  # semua kasus (registry bersama)
@@ -55,7 +59,7 @@ class ForestMonitoringModel(mesa.Model):
             if use_validation
             else []
         )
-        self.notifier = NotificationAgent(self, verbose=verbose)
+        self.notifier = NotificationAgent(self, ha_per_px=getattr(self.env, "ha_per_px", 1.0), verbose=verbose)
 
         self.datacollector = mesa.DataCollector(
             model_reporters={

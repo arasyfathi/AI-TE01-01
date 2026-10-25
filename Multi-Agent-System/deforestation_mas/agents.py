@@ -21,6 +21,7 @@ Konsensus: kasus hanya dinyatakan nyata bila DUA bukti independen setuju.
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass, field
 
 import mesa
@@ -133,8 +134,12 @@ class ChangeDetectionAgent(MonitorAgent):
         max_rounds=2,
         memory_days=10,
         fire_growth_days=5,
+        min_valid_fraction=0.5,
+        max_wait_days=10,
     ):
         super().__init__(model, name)
+        self.min_valid_fraction = min_valid_fraction  # porsi piksel kasus yang harus bebas awan saat cek kemenetapan
+        self.max_wait_days = max_wait_days  # batas menunggu citra bersih sebelum kasus diserahkan ke manusia
         self.rows = rows  # wilayah tanggung jawab (baris citra), untuk pembagian kerja
         self.drop_threshold = drop_threshold
         self.persist_threshold = persist_threshold
@@ -160,6 +165,10 @@ class ChangeDetectionAgent(MonitorAgent):
 
         for case in self.my_cases(PENDING):
             self._try_resolve(case)
+            if case.status == PENDING and case.det_vote is None and self.model.day - case.day > self.max_wait_days:
+                # Terus tertutup awan/asap: kemenetapan tak bisa dipastikan -> serahkan ke analis.
+                case.evidence["catatan"] = f"tidak ada citra bersih selama {self.max_wait_days} hari"
+                self._finalize(case, UNCERTAIN, cause=case.cause)
 
     def my_cases(self, status=None):
         return [
@@ -172,7 +181,9 @@ class ChangeDetectionAgent(MonitorAgent):
         stack = [self.model.archive[d].ndvi for d in reference_window(day) if d in self.model.archive]
         if len(stack) < 2:
             return None
-        return np.median(np.stack(stack), axis=0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # piksel yang tertutup awan di semua hari acuan
+            return np.nanmedian(np.stack(stack), axis=0)
 
     def _detect(self, day: int):
         ref = self.reference_composite(day)
@@ -268,7 +279,11 @@ class ChangeDetectionAgent(MonitorAgent):
         for case in self.my_cases(PENDING):
             if case.det_vote is not None or day <= case.last_check_day:
                 continue
-            drop = float((case.reference - self.model.archive[day].ndvi)[case.mask].mean())
+            diff = (case.reference - self.model.archive[day].ndvi)[case.mask]
+            valid = np.isfinite(diff)
+            if valid.mean() < self.min_valid_fraction:
+                continue  # hari ini tertutup awan/asap -> tunggu citra bersih berikutnya
+            drop = float(diff[valid].mean())
             case.det_vote = drop >= self.persist_threshold
             case.last_check_day = day
             case.evidence[f"persist_r{case.round}"] = {"day": day, "ndvi_drop": round(drop, 3)}
@@ -282,7 +297,8 @@ class ChangeDetectionAgent(MonitorAgent):
         case.cause = msg.content["cause"]
         case.val_confidence = msg.content["confidence"]
         case.evidence[f"thermal_r{case.round}"] = {
-            k: msg.content[k] for k in ("day", "mean_anomaly", "hot_fraction", "cause")
+            k: msg.content.get(k) for k in ("day", "mean_anomaly", "hot_fraction", "fire_fraction", "cause")
+            if k in msg.content
         }
 
     def _try_resolve(self, case: Case):
@@ -327,11 +343,33 @@ class ValidationAgent(MonitorAgent):
 
     role = "validation"
 
-    def __init__(self, model, name: str, fire_anomaly=6.0, cloud_anomaly=-3.0, max_attempts=3):
+    def __init__(
+        self,
+        model,
+        name: str,
+        fire_anomaly=6.0,
+        cloud_anomaly=-3.0,
+        max_attempts=3,
+        fire_from_lst=True,
+        fire_lookback=5,
+        fire_buffer_px=2,
+        fire_fraction_threshold=0.05,
+        fire_min_observed=0.5,
+    ):
         super().__init__(model, name)
         self.fire_anomaly = fire_anomaly
         self.cloud_anomaly = cloud_anomaly
         self.max_attempts = max_attempts
+        # Sumber bukti kebakaran. Pada data simulasi, anomali suhu sudah cukup. Pada data nyata, tanah
+        # gundul/terbakar sama-sama lebih panas, jadi kebakaran harus dibuktikan dengan deteksi titik api
+        # (fire mask) dan ``fire_from_lst`` dimatikan.
+        self.fire_from_lst = fire_from_lst
+        self.fire_lookback = fire_lookback  # hari ke belakang yang diperiksa untuk titik api
+        self.fire_buffer_px = fire_buffer_px  # toleransi lokasi titik api (piksel) di sekitar wilayah kasus
+        self.fire_fraction_threshold = fire_fraction_threshold
+        self.fire_min_observed = fire_min_observed  # porsi minimal piksel yang teramati (bukan awan)
+        self.has_fire_data = hasattr(model.env, "fetch_fire")
+        self.fire: dict[int, np.ndarray] = {}
         self.thermal: dict[int, np.ndarray] = {}
         self.queue: list[dict] = []
         self.agreements = 0
@@ -362,41 +400,89 @@ class ValidationAgent(MonitorAgent):
         self.queue = remaining
 
     def _sync_thermal(self):
+        env = self.model.env
         for d in range(max(1, self.model.day - 15), self.model.day + 1):
             if d not in self.thermal:
-                t = self.model.env.fetch_thermal(d)
+                t = env.fetch_thermal(d)
                 if t is not None:
                     self.thermal[d] = t
+            if self.has_fire_data and d not in self.fire:
+                f = env.fetch_fire(d)
+                if f is not None:
+                    self.fire[d] = f
+
+    def _fire_fraction(self, day: int, mask: np.ndarray) -> float | None:
+        """Fraksi piksel di sekitar wilayah kasus yang terdeteksi titik api (nilai maksimum selama
+        ``fire_lookback`` hari terakhir). ``None`` bila tidak ada pengamatan titik api yang cukup."""
+        if not self.has_fire_data:
+            return None
+        zone = mask
+        if self.fire_buffer_px > 0:
+            zone = ndimage.binary_dilation(mask, structure=EIGHT, iterations=self.fire_buffer_px)
+        best = None
+        for d in range(day - self.fire_lookback, day + 1):
+            f = self.fire.get(d)
+            if f is None:
+                continue
+            vals = f[zone]
+            seen = np.isfinite(vals)  # NaN = awan / tidak diproses
+            if seen.size == 0 or seen.mean() < self.fire_min_observed:
+                continue
+            frac = float((vals[seen] > 0.5).mean())
+            best = frac if best is None else max(best, frac)
+        return best
 
     def _validate(self, req) -> bool:
         day, mask = req["day"], req["mask"]
         ref_days = [d for d in reference_window(day) if d in self.thermal]
         if day not in self.thermal or len(ref_days) < 2:
             return False  # data termal belum lengkap -> coba lagi besok
-        ref = np.median(np.stack([self.thermal[d] for d in ref_days]), axis=0)
-        anom = (self.thermal[day] - ref)[mask]
-        mean_anom = float(anom.mean())
-        hot = float((anom > 8.0).mean())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)  # piksel tanpa data termal (awan)
+            ref = np.nanmedian(np.stack([self.thermal[d] for d in ref_days]), axis=0)
+        anom_all = (self.thermal[day] - ref)[mask]
+        anom = anom_all[np.isfinite(anom_all)]
+        thermal_ok = anom.size >= max(1.0, 0.5 * anom_all.size)
+        mean_anom = float(anom.mean()) if thermal_ok else float("nan")
+        hot = float((anom > 8.0).mean()) if thermal_ok else 0.0
+        fire_frac = self._fire_fraction(day, mask)
 
-        if mean_anom >= self.fire_anomaly or hot >= 0.3:
-            conf = min(0.99, 0.6 + 0.04 * (mean_anom - self.fire_anomaly) + 0.3 * hot)
-            self._reply(req, True, "fire", max(conf, 0.6), mean_anom, hot)
-        elif mean_anom <= self.cloud_anomaly:
+        lst_fire = self.fire_from_lst and thermal_ok and (mean_anom >= self.fire_anomaly or hot >= 0.3)
+        mask_fire = fire_frac is not None and fire_frac >= self.fire_fraction_threshold
+
+        if lst_fire or mask_fire:
+            conf = 0.6
+            if lst_fire:
+                conf = max(conf, min(0.99, 0.6 + 0.04 * (mean_anom - self.fire_anomaly) + 0.3 * hot))
+            if mask_fire:
+                conf = max(conf, min(0.99, 0.8 + fire_frac))
+            self._reply(req, True, "fire", conf, mean_anom, hot, fire_frac)
+        elif thermal_ok and mean_anom <= self.cloud_anomaly:
             conf = min(0.99, 0.6 + 0.05 * (self.cloud_anomaly - mean_anom))
-            self._reply(req, False, "cloud", conf, mean_anom, hot)
+            self._reply(req, False, "cloud", conf, mean_anom, hot, fire_frac)
+        elif thermal_ok or fire_frac is not None:
+            # Tidak ada bukti api -> tebang liar.
+            if self.fire_from_lst and thermal_ok:
+                conf = float(np.clip(1.0 - abs(mean_anom - 2.0) / 5.0, 0.5, 0.95))
+            elif fire_frac is not None:
+                conf = 0.85  # api teramati dan tidak ada
+            else:
+                conf = 0.6
+            self._reply(req, True, "logging", conf, mean_anom, hot, fire_frac)
         else:
-            conf = float(np.clip(1.0 - abs(mean_anom - 2.0) / 5.0, 0.5, 0.95))
-            self._reply(req, True, "logging", conf, mean_anom, hot)
+            return False  # suhu dan titik api sama-sama tertutup awan -> coba lagi besok
         return True
 
-    def _reply(self, req, real, cause, conf, anom, hot):
-        self.send(
-            PROPOSE, req["requester"], "verdict",
-            {"case_id": req["case_id"], "round": req["round"], "day": req["day"], "real": real,
-             "cause": cause, "confidence": round(conf, 2), "mean_anomaly": round(anom, 2),
-             "hot_fraction": round(hot, 2)},
-            req["case_id"],
-        )
+    def _reply(self, req, real, cause, conf, anom, hot, fire_frac=None):
+        content = {
+            "case_id": req["case_id"], "round": req["round"], "day": req["day"], "real": real,
+            "cause": cause, "confidence": round(conf, 2),
+            "mean_anomaly": None if np.isnan(anom) else round(anom, 2),
+            "hot_fraction": round(hot, 2),
+        }
+        if self.has_fire_data:
+            content["fire_fraction"] = None if fire_frac is None else round(fire_frac, 2)
+        self.send(PROPOSE, req["requester"], "verdict", content, req["case_id"])
 
 
 # ---------------------------------------------------------------------------

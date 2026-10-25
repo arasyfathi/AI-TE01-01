@@ -50,6 +50,8 @@ class TrueEvent:
 
 
 class ForestEnvironment:
+    ha_per_px = 1.0  # luas satu piksel (hektar), dipakai Agen Notifikasi
+
     def __init__(
         self,
         size: int = 64,

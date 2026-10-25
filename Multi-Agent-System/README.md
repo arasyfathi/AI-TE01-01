@@ -5,9 +5,9 @@ secara terus-menerus untuk mendeteksi **tebang liar** dan **kebakaran hutan**. A
 sendiri: setiap wilayah yang dicurigai harus disepakati (konsensus) oleh dua agen dengan sumber bukti
 berbeda sebelum peringatan dikirim ke pihak berwenang.
 
-> Tahap saat ini memakai **lingkungan satelit sintetis** (NDVI optik + suhu termal mirip MODIS) yang
-> dilengkapi *ground truth*, sehingga kinerja sistem bisa diukur. Lihat
-> [Menuju data nyata](#-menuju-data-nyata-google-earth-engine) untuk tahap berikutnya.
+> Sistem berjalan pada dua jenis data: **lingkungan satelit sintetis** yang dilengkapi *ground truth* sehingga
+> kinerjanya bisa diukur (bagian 4-5), dan **data nyata MODIS dari Google Earth Engine** dalam mode replay
+> (bagian 8).
 
 ---
 
@@ -96,7 +96,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 12 pengujian
+python -m pytest -q tests                             # 25 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
@@ -112,25 +112,68 @@ Multi-Agent-System/
 │   ├── messaging.py     # MessageBus & pesan bergaya FIPA-ACL
 │   ├── agents.py        # 4 agen + logika konsensus
 │   ├── model.py         # mesa.Model: pipeline harian & DataCollector
-│   └── evaluation.py    # recall, precision, akurasi penyebab, latensi
-├── tests/test_mas.py
-├── run_simulation.py
-└── requirements.txt
+│   ├── evaluation.py    # recall, precision, akurasi penyebab, latensi
+│   └── gee_environment.py  # adapter data nyata Google Earth Engine (MODIS)
+├── tests/               # test_mas.py (simulasi), test_gee_adapter.py (adapter GEE)
+├── run_simulation.py    # simulasi sintetis
+├── run_gee.py           # replay pada data nyata GEE (--check untuk uji koneksi)
+├── requirements.txt
+└── requirements-gee.txt # tambahan untuk GEE
 ```
 
-## 8. 🛰️ Menuju data nyata (Google Earth Engine)
+## 8. 🛰️ Data nyata dari Google Earth Engine (replay MODIS)
 
-Agen hanya memakai empat metode dari lingkungan: `available_days()`, `download(day)`,
-`fetch_thermal(day)`, dan `to_latlon(r, c)`. Untuk data nyata, cukup buat kelas baru dengan antarmuka
-yang sama, misalnya:
+Adapter `deforestation_mas/gee_environment.py` memenuhi antarmuka yang sama dengan lingkungan sintetis, jadi
+agen yang sama langsung bisa memakai data nyata. Data lampau diputar ulang hari demi hari seolah-olah baru
+masuk (*replay*), sehingga hasilnya bisa dicocokkan dengan kejadian yang sudah diketahui.
 
-- `download()` mengambil NDVI Sentinel-2 (`COPERNICUS/S2_SR_HARMONIZED`) dengan masker awan, via
-  `earthengine-api`/`geemap`.
-- `fetch_thermal()` mengambil MODIS LST (`MODIS/061/MOD11A1`) dan/atau titik api aktif
-  (`FIRMS`, `MODIS/061/MOD14A1`).
-- `to_latlon()` memakai transformasi georeferensi raster yang sebenarnya.
+**Persiapan (sekali saja)**
+```bash
+pip install -r requirements-gee.txt
+earthengine authenticate          # login lewat browser
+```
+Akun GEE harus terhubung ke proyek Google Cloud; catat **Project ID**-nya.
 
-Ambang (`drop_threshold`, `fire_anomaly`, `cloud_anomaly`) perlu dikalibrasi ulang dengan data nyata.
+**Menjalankan**
+```bash
+# 1) uji koneksi dan satu hari data (hanya 1 permintaan ke GEE)
+python run_gee.py --project PROJECT-ID --check
+
+# 2) replay periode (hasil unduhan di-cache di gee_cache/, jadi pengulangan tidak memakai kuota)
+python run_gee.py --project PROJECT-ID --days 60
+
+# 3) ganti wilayah/periode atau kalibrasi ambang
+python run_gee.py --project PROJECT-ID --lat -2.35 --lon 114.0 --start 2023-08-15 --days 90
+python run_gee.py --project PROJECT-ID --drop-threshold 0.15 --persist-threshold 0.10
+```
+`--project` boleh dikosongkan bila variabel lingkungan `EE_PROJECT` sudah diatur. Hasil ada di `output_gee/`
+(`alerts.json` dengan tanggal asli, `timeseries.csv`, `gee_replay.png`; `--check` menyimpan `check.png`).
+Wilayah bawaan: 10 x 10 km di sekitar Palangka Raya, Kalimantan Tengah.
+
+**Data yang dipakai** (satu grid yang sama, 250 m)
+
+| Bukti | Koleksi GEE | Pemrosesan |
+| :--- | :--- | :--- |
+| NDVI | `MODIS/061/MOD09GQ` (250 m) | (NIR - merah) / (NIR + merah); piksel berawan, bayangan awan, aerosol/asap tinggi, dan cirrus tinggi dimasker memakai `state_1km` dari `MODIS/061/MOD09GA` |
+| Suhu permukaan | `MODIS/061/MOD11A1` (1 km) | K → °C; piksel "tidak ada LST" (awan) dimasker |
+| Titik api | `MODIS/061/MOD14A1` (1 km) | kelas 7-9 = api, kelas 5 = tanah tanpa api, selain itu (awan, tidak diproses) = tak teramati |
+
+**Perbedaan penting dibanding data sintetis**
+- **Awan menjadi data bolong (NaN)**, bukan penurunan NDVI palsu. Agen menunggu citra bersih berikutnya. Bila
+  citra pengecekan terus tertutup lebih dari 10 hari, kasus diserahkan ke analis (`uncertain`).
+- **Kebakaran dibuktikan oleh titik api MODIS**, bukan oleh suhu: tanah gundul pun lebih panas, jadi anomali suhu
+  tidak bisa membedakan tebang liar dari kebakaran. Tebang liar diputuskan bila titik api teramati dan tidak ada.
+  Api yang tidak teramati karena awan tidak dianggap "tidak ada api"; Agen Validasi menunggu hari lain.
+- **Resolusi 250 m**: satu piksel = ±6 ha, sehingga tebangan kecil tidak terlihat dan wilayah curiga minimal
+  4 piksel (±25 ha). Suhu dan titik api (1 km) tampak berblok. Sentinel-2 (10 m) bisa menggantikannya, tetapi
+  revisitnya ±5 hari sehingga logika acuan "minggu lalu" perlu diubah.
+- **Latensi**: data MODIS di GEE biasanya terlambat beberapa hari. `--latency N` menunda ketersediaan data
+  agar replay lebih realistis.
+
+**Status pengujian**: logika adapter, penanganan data bolong, cache, percobaan ulang, dan CLI diuji dengan GEE
+tiruan (`tests/test_gee_adapter.py`). Panggilan ke server GEE sungguhan (ekspresi citra dan `computePixels`)
+belum bisa diuji otomatis; gunakan `--check` untuk memastikannya di akun Anda. Ambang (`drop_threshold`,
+`persist_threshold`, dst.) masih nilai awal dan perlu dikalibrasi pada kejadian nyata.
 
 ## 9. Ide pengembangan berikutnya
 
