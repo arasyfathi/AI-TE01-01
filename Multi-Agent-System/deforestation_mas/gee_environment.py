@@ -57,8 +57,12 @@ class GEEEnvironment:
         cache_dir: str | Path | None = "gee_cache",
         retries: int = 3,
         max_failures: int = 5,
+        mask_haze: bool = True,
     ):
         self.project = project
+        # True: piksel beraerosol/asap tinggi dan bercirrus tinggi ikut dibuang dari NDVI. Pada musim
+        # kebakaran asap bisa menutup seluruh area; False mempertahankannya (NDVI sedikit lebih rendah).
+        self.mask_haze = mask_haze
         self.center = center  # (lat, lon)
         self.start = dt.date.fromisoformat(start)
         self.n_days = n_days
@@ -128,41 +132,48 @@ class GEEEnvironment:
             out[key] = {dt.datetime.fromtimestamp(m / 1000, dt.timezone.utc).strftime("%Y-%m-%d") for m in ms}
         return out
 
-    def _build_image(self, ee, date: str):
+    @staticmethod
+    def _state_flags(state) -> dict:
+        """Bendera kualitas dari band ``state_1km`` MOD09GA (masing-masing citra 0/1)."""
+        cloud_state = state.bitwiseAnd(3)  # 0 bersih, 1 berawan, 2 campuran, 3 tidak diatur (dianggap bersih)
+        return {
+            "awan": cloud_state.eq(1).Or(cloud_state.eq(2)),
+            "bayangan_awan": state.rightShift(2).bitwiseAnd(1).eq(1),
+            "awan_internal": state.rightShift(10).bitwiseAnd(1).eq(1),
+            "aerosol_tinggi": state.rightShift(6).bitwiseAnd(3).eq(3),
+            "cirrus_tinggi": state.rightShift(8).bitwiseAnd(3).eq(3),
+        }
+
+    def _day_images(self, ee, date: str):
         d0 = ee.Date(date)
         d1 = d0.advance(1, "day")
 
-        def day_image(cid):
-            return ee.ImageCollection(cid).filterDate(d0, d1).mosaic()
-
-        empty = lambda name: ee.Image.constant(0).selfMask().rename(name)  # noqa: E731 - seluruhnya tertutup
+        def day_image(key):
+            return ee.ImageCollection(COLLECTIONS[key]).filterDate(d0, d1).mosaic()
 
         if not (self._exists(ee, "sr250", date) and self._exists(ee, "sr500", date)):
             raise LookupError(
                 f"tidak ada citra {COLLECTIONS['sr250']} / {COLLECTIONS['sr500']} pada {date} "
                 "(data MODIS biasanya terlambat beberapa hari; coba tanggal yang lebih lama)"
             )
+        return day_image
 
-        # NDVI 250 m + masker awan/asap dari state_1km
-        gq, ga = day_image(COLLECTIONS["sr250"]), day_image(COLLECTIONS["sr500"])
-        state = ga.select("state_1km")
-        cloud_state = state.bitwiseAnd(3)  # 0 bersih, 1 berawan, 2 campuran, 3 tidak diatur (dianggap bersih)
-        cloudy = (
-            cloud_state.eq(1).Or(cloud_state.eq(2))
-            .Or(state.rightShift(2).bitwiseAnd(1).eq(1))    # bayangan awan
-            .Or(state.rightShift(10).bitwiseAnd(1).eq(1))   # algoritma awan internal
-        )
-        hazy = (
-            state.rightShift(6).bitwiseAnd(3).eq(3)         # aerosol/asap tinggi
-            .Or(state.rightShift(8).bitwiseAnd(3).eq(3))    # cirrus tinggi
-        )
-        red, nir = gq.select("sur_refl_b01"), gq.select("sur_refl_b02")
-        ndvi = nir.subtract(red).divide(nir.add(red)).rename("ndvi")
-        ndvi = ndvi.updateMask(cloudy.Not()).updateMask(hazy.Not()).updateMask(ndvi.gte(-0.2).And(ndvi.lte(1)))
+    def _build_image(self, ee, date: str):
+        day_image = self._day_images(ee, date)
+        empty = lambda name: ee.Image.constant(0).selfMask().rename(name)  # noqa: E731 - seluruhnya tertutup
+
+        # NDVI 250 m + masker awan (dan bila diminta, asap/cirrus) dari state_1km
+        gq, ga = day_image("sr250"), day_image("sr500")
+        flags = self._state_flags(ga.select("state_1km"))
+        bad = flags["awan"].Or(flags["bayangan_awan"]).Or(flags["awan_internal"])
+        if self.mask_haze:
+            bad = bad.Or(flags["aerosol_tinggi"]).Or(flags["cirrus_tinggi"])
+        ndvi = gq.normalizedDifference(["sur_refl_b02", "sur_refl_b01"]).rename("ndvi")
+        ndvi = ndvi.updateMask(bad.Not()).updateMask(ndvi.gte(-0.2).And(ndvi.lte(1)))
 
         # Suhu permukaan siang (K -> C), buang piksel "tidak ada LST" (awan)
         if self._exists(ee, "lst", date):
-            m = day_image(COLLECTIONS["lst"])
+            m = day_image("lst")
             raw = m.select("LST_Day_1km")
             qc = m.select("QC_Day").bitwiseAnd(3)
             lst = raw.updateMask(raw.gte(7500)).updateMask(qc.lt(2)).multiply(0.02).subtract(273.15).rename("lst")
@@ -171,7 +182,7 @@ class GEEEnvironment:
 
         # Titik api: 1 = api (kelas 7-9), 0 = tanah tanpa api (kelas 5), selain itu tertutup
         if self._exists(ee, "fire", date):
-            fm = day_image(COLLECTIONS["fire"]).select("FireMask")
+            fm = day_image("fire").select("FireMask")
             fire = fm.gte(7).updateMask(fm.eq(5).Or(fm.gte(7))).rename("fire")
         else:
             fire = empty("fire")
@@ -212,17 +223,17 @@ class GEEEnvironment:
         self.errors.append(f"{date}: {type(last).__name__}: {last}")
         return None
 
-    def _decode(self, arr) -> dict[str, np.ndarray]:
-        """Ubah keluaran computePixels (larik terstruktur atau (H, W, B)) menjadi tiga bidang, NODATA -> NaN."""
+    def _decode(self, arr, names=BANDS) -> dict[str, np.ndarray]:
+        """Ubah keluaran computePixels (larik terstruktur atau (H, W, B)) menjadi bidang per band, NODATA -> NaN."""
         if getattr(arr, "dtype", None) is not None and arr.dtype.names:
-            planes = [np.asarray(arr[name], dtype=float) for name in BANDS]
+            planes = [np.asarray(arr[name], dtype=float) for name in names]
         else:
             a = np.asarray(arr, dtype=float)
-            if a.ndim != 3 or a.shape[-1] < len(BANDS):
+            if a.ndim != 3 or a.shape[-1] < len(names):
                 raise ValueError(f"bentuk keluaran GEE tidak dikenali: {a.shape}")
-            planes = [a[..., i] for i in range(len(BANDS))]
+            planes = [a[..., i] for i in range(len(names))]
         out = {}
-        for name, plane in zip(BANDS, planes):
+        for name, plane in zip(names, planes):
             if plane.shape != (self.size, self.size):
                 raise ValueError(f"ukuran {name} {plane.shape}, diharapkan {(self.size, self.size)}")
             out[name] = np.where(plane <= NODATA + 0.5, np.nan, plane).astype(np.float32)
@@ -232,7 +243,8 @@ class GEEEnvironment:
     def _cache_path(self, date: str) -> Path | None:
         if self.cache_dir is None:
             return None
-        name = f"{self.center[0]:.4f}_{self.center[1]:.4f}_{self.size}_{self.pixel_m:g}_{date}.npz"
+        haze = "h1" if self.mask_haze else "h0"
+        name = f"{self.center[0]:.4f}_{self.center[1]:.4f}_{self.size}_{self.pixel_m:g}_{haze}_{date}.npz"
         return self.cache_dir / name
 
     def _load(self, day: int) -> dict[str, np.ndarray] | None:
@@ -306,3 +318,66 @@ class GEEEnvironment:
                 "mean": float(a[ok].mean()) if ok.any() else None,
             }
         return stats, data
+
+    # ------------------------------------------------------------ diagnosis
+    def _diagnostic_image(self, ee, date: str):
+        day_image = self._day_images(ee, date)
+        gq, ga = day_image("sr250"), day_image("sr500")
+        empty = lambda name: ee.Image.constant(0).selfMask().rename(name)  # noqa: E731
+        bands = [gq.select("sur_refl_b01").mask().gt(0).rename("ada_reflektansi")]
+        bands += [img.rename(name) for name, img in self._state_flags(ga.select("state_1km")).items()]
+        bands.append(
+            day_image("lst").select("QC_Day").bitwiseAnd(3).rename("lst_qc")
+            if self._exists(ee, "lst", date) else empty("lst_qc")
+        )
+        bands.append(
+            day_image("fire").select("FireMask").rename("firemask")
+            if self._exists(ee, "fire", date) else empty("firemask")
+        )
+        names = ("ada_reflektansi", *self.DIAG_FLAGS, "lst_qc", "firemask")
+        return ee.Image.cat(bands).toFloat().unmask(NODATA), names
+
+    DIAG_FLAGS = ("awan", "bayangan_awan", "awan_internal", "aerosol_tinggi", "cirrus_tinggi")
+
+    def diagnose(self, date: str) -> dict:
+        """Rincian alasan piksel terbuang pada satu hari: bendera state_1km, kelas QC suhu, kelas FireMask."""
+        ee = self.connect()
+        image, names = self._diagnostic_image(ee, date)
+        arr = ee.data.computePixels({"expression": image, "fileFormat": "NUMPY_NDARRAY", "grid": self._grid()})
+        planes = self._decode(arr, names)
+        report = {}
+        for name in names:
+            a = planes[name]
+            ok = np.isfinite(a)
+            entry = {"tersedia_pct": round(100 * float(ok.mean()), 1)}
+            if name in ("lst_qc", "firemask"):
+                values, counts = np.unique(a[ok].astype(int), return_counts=True)
+                entry["kelas_pct"] = {int(v): round(100 * c / ok.sum(), 1) for v, c in zip(values, counts)}
+            else:
+                entry["ya_pct"] = round(100 * float((a[ok] > 0.5).mean()), 1) if ok.any() else None
+            report[name] = entry
+        return report
+
+    def scan(self, n_days: int | None = None):
+        """Unduh (sekaligus mengisi cache) hari-hari pertama replay dan ringkas tiap hari.
+        Menghasilkan (tanggal, ringkasan atau None, pesan error atau None)."""
+        n = min(n_days or self.n_days, self.n_days)
+        if self._dates is None:
+            self._dates = self._list_dates()
+        have = self._dates["sr250"] & self._dates["sr500"]
+        for day in range(1, n + 1):
+            date = self.date_of(day)
+            if date not in have:
+                yield date, None, "tidak ada citra MODIS"
+                continue
+            data = self._load(day)
+            if data is None:
+                yield date, None, self.errors[-1] if self.errors else "gagal"
+                continue
+            fire = data["fire"]
+            yield date, {
+                "ndvi_pct": round(100 * float(np.isfinite(data["ndvi"]).mean()), 1),
+                "lst_pct": round(100 * float(np.isfinite(data["lst"]).mean()), 1),
+                "fire_obs_pct": round(100 * float(np.isfinite(fire).mean()), 1),
+                "fire_px": int(np.nansum(fire > 0.5)),
+            }, None

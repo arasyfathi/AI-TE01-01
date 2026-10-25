@@ -43,6 +43,9 @@ def parse_args(argv=None):
     p.add_argument("--days", type=int, default=60, help="lama replay (hari)")
     p.add_argument("--latency", type=int, default=0, help="jeda ketersediaan data (hari)")
     p.add_argument("--check", nargs="?", const="", metavar="TANGGAL", help="uji satu hari lalu keluar")
+    p.add_argument("--scan", type=int, metavar="N", help="periksa N hari pertama (mengisi cache) lalu keluar")
+    p.add_argument("--keep-haze", action="store_true",
+                   help="jangan buang piksel beraerosol/asap tinggi dan bercirrus tinggi dari NDVI")
     p.add_argument("--detectors", type=int, default=1)
     p.add_argument("--validators", type=int, default=1)
     p.add_argument("--drop-threshold", type=float, default=0.20, help="penurunan NDVI yang dianggap drastis")
@@ -58,6 +61,7 @@ def make_env(args) -> GEEEnvironment:
     return GEEEnvironment(
         project=args.project, center=(args.lat, args.lon), start=args.start, n_days=args.days,
         size=args.size, pixel_m=args.pixel, latency_days=args.latency, cache_dir=args.cache_dir,
+        mask_haze=not args.keep_haze,
     )
 
 
@@ -91,8 +95,7 @@ def run_check(args) -> int:
         print(f"{labels[k]:30s}{s['valid_pct']:>13.1f}%{fmt(s['min']):>9s}{fmt(s['max']):>9s}{fmt(s['mean']):>9s}")
     n_fire = int(np.nansum(data["fire"] > 0.5))
     print(f"\nPiksel (250 m) bertanda titik api hari itu: {n_fire}")
-    if stats["ndvi"]["valid_pct"] < 20:
-        print("Catatan: sebagian besar NDVI tertutup awan/asap hari ini. Itu wajar di Kalimantan; coba tanggal lain.")
+    print_diagnosis(env, date, args)
     print("\nWajar bila: NDVI hutan tropis sekitar 0.6-0.9, suhu siang sekitar 25-40 C. Jika tidak, kabari saya.")
 
     import matplotlib
@@ -112,6 +115,78 @@ def run_check(args) -> int:
     path = args.out / "check.png"
     fig.savefig(path, dpi=110)
     print(f"Pratinjau disimpan: {path}")
+    return 0
+
+
+LST_QC = {0: "baik", 1: "kualitas lain", 2: "tidak ada (awan)", 3: "tidak ada (lainnya)"}
+FIRE_CLASS = {0: "data hilang", 1: "tidak diproses", 2: "tidak diproses", 3: "air", 4: "awan",
+              5: "tanah tanpa api", 6: "tidak diketahui", 7: "api (rendah)", 8: "api (sedang)", 9: "api (tinggi)"}
+
+
+def print_diagnosis(env, date, args):
+    """Rincian kenapa piksel terbuang, agar bisa dibedakan antara 'memang berawan' dan 'masker terlalu ketat'."""
+    try:
+        rep = env.diagnose(date)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\n(Rincian masker tidak tersedia: {type(exc).__name__}: {exc})")
+        return
+    flag_labels = {
+        "awan": "awan / campuran awan",
+        "bayangan_awan": "bayangan awan",
+        "awan_internal": "awan (algoritma internal)",
+        "aerosol_tinggi": "aerosol/asap tinggi",
+        "cirrus_tinggi": "cirrus tinggi",
+    }
+    print(f"\nRincian masker NDVI (band state_1km MOD09GA, data state tersedia "
+          f"{rep['awan']['tersedia_pct']:.0f}% piksel):")
+    print(f"  {'ada data reflektansi 250 m':30s}: {rep['ada_reflektansi']['ya_pct']}%")
+    for key, label in flag_labels.items():
+        haze = key in ("aerosol_tinggi", "cirrus_tinggi")
+        note = ""
+        if haze:
+            note = "  <- tidak dibuang (--keep-haze)" if args.keep_haze else "  <- dibuang; --keep-haze untuk mempertahankan"
+        print(f"  {label:30s}: {rep[key]['ya_pct']}%{note}")
+
+    def classes(entry, labels):
+        if not entry.get("kelas_pct"):
+            return "tidak ada data"
+        return ", ".join(f"{labels.get(k, k)} {v}%" for k, v in entry["kelas_pct"].items())
+
+    print(f"Kualitas suhu (QC_Day)        : {classes(rep['lst_qc'], LST_QC)}")
+    print(f"Kelas titik api (FireMask)    : {classes(rep['firemask'], FIRE_CLASS)}")
+
+    haze_pct = max(rep["aerosol_tinggi"]["ya_pct"] or 0, rep["cirrus_tinggi"]["ya_pct"] or 0)
+    cloud_pct = rep["awan"]["ya_pct"] or 0
+    if (rep["ada_reflektansi"]["ya_pct"] or 0) < 50:
+        print("Kesimpulan: citra 250 m hari itu tidak menutupi area ini (celah lintasan satelit). Coba tanggal lain.")
+    elif not args.keep_haze and haze_pct >= 50 and cloud_pct < 50:
+        print("Kesimpulan: yang membuang piksel terutama bendera asap/cirrus, bukan awan. Coba ulangi dengan --keep-haze.")
+    elif cloud_pct >= 50:
+        print("Kesimpulan: area ini memang tertutup awan hari itu. Coba tanggal lain atau jalankan --scan untuk mencari hari cerah.")
+
+
+def run_scan(args) -> int:
+    env = make_env(args)
+    n = min(args.scan, args.days)
+    print(f"Memeriksa {n} hari mulai {args.start} di ({args.lat}, {args.lon}); hasilnya disimpan ke cache untuk replay.")
+    print(f"\n{'tanggal':12s}{'NDVI valid':>12s}{'suhu valid':>12s}{'api teramati':>14s}{'piksel api':>12s}")
+    rows = []
+    try:
+        for date, s, err in env.scan(n):
+            if s is None:
+                print(f"{date:12s}  {err}")
+                continue
+            rows.append(s)
+            print(f"{date:12s}{s['ndvi_pct']:>11.1f}%{s['lst_pct']:>11.1f}%{s['fire_obs_pct']:>13.1f}%{s['fire_px']:>12d}")
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nGAGAL: {type(exc).__name__}: {exc}")
+        return 1
+    if rows:
+        clear = sum(r["ndvi_pct"] >= 50 for r in rows)
+        print(f"\n{clear} dari {len(rows)} hari punya NDVI bersih >= 50% area; "
+              f"{sum(r['fire_px'] > 0 for r in rows)} hari dengan titik api.")
+        if clear == 0:
+            print("Tidak ada hari cerah. Coba --keep-haze, periode lain (--start), atau lokasi lain (--lat/--lon).")
     return 0
 
 
@@ -155,6 +230,8 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.check is not None:
         return run_check(args)
+    if args.scan:
+        return run_scan(args)
 
     env = make_env(args)
     model = build_model(args, env)

@@ -334,3 +334,82 @@ def test_replay_listing_and_download_with_stub_ee():
     assert env.download(3) is None  # 17 Agustus tidak ada citra
     assert env.fetch_fire(4).shape == (40, 40)
     assert isinstance(ee.ImageCollection, MagicMock)
+
+
+DIAG_NAMES = ("ada_reflektansi", "awan", "bayangan_awan", "awan_internal", "aerosol_tinggi", "cirrus_tinggi",
+              "lst_qc", "firemask")
+
+
+def _diag_array(**values):
+    arr = np.zeros((40, 40), dtype=[(n, "f4") for n in DIAG_NAMES])
+    for k, v in values.items():
+        arr[k] = v
+    return arr
+
+
+def test_ndvi_uses_normalized_difference_and_haze_switch():
+    ee = _stub_ee()
+    env = GEEEnvironment(project="x", size=40, cache_dir=None, retries=1)
+    env._ee = ee
+    env.check("2023-08-20")
+    mosaic = ee.ImageCollection.return_value.filterDate.return_value.mosaic.return_value
+    mosaic.normalizedDifference.assert_called_with(["sur_refl_b02", "sur_refl_b01"])
+
+    on = GEEEnvironment(cache_dir="c")._cache_path("2023-08-20").name
+    off = GEEEnvironment(cache_dir="c", mask_haze=False)._cache_path("2023-08-20").name
+    assert on != off and "_h1_" in on and "_h0_" in off  # cache tidak tercampur antar pengaturan
+
+
+def test_diagnose_reports_flags_and_classes():
+    ee = _stub_ee()
+    ee.data.computePixels.return_value = _diag_array(ada_reflektansi=1, aerosol_tinggi=1, lst_qc=2, firemask=5)
+    env = GEEEnvironment(project="x", size=40, cache_dir=None, retries=1)
+    env._ee = ee
+    rep = env.diagnose("2023-08-15")
+    assert rep["ada_reflektansi"]["ya_pct"] == 100.0 and rep["awan"]["ya_pct"] == 0.0
+    assert rep["aerosol_tinggi"]["ya_pct"] == 100.0
+    assert rep["lst_qc"]["kelas_pct"] == {2: 100.0} and rep["firemask"]["kelas_pct"] == {5: 100.0}
+
+
+@pytest.mark.parametrize("flags,expected", [
+    ({"ada_reflektansi": 1, "aerosol_tinggi": 1}, "--keep-haze"),
+    ({"ada_reflektansi": 1, "awan": 1}, "memang tertutup awan"),
+    ({"ada_reflektansi": 0}, "tidak menutupi area"),
+])
+def test_check_explains_why_ndvi_is_empty(tmp_path, monkeypatch, capsys, flags, expected):
+    import run_gee
+
+    ee = _stub_ee()
+    main = np.full((40, 40, 3), NODATA)
+    ee.data.computePixels.side_effect = [main, _diag_array(lst_qc=2, firemask=5, **flags)]
+
+    def env_with_stub(args):
+        env = GEEEnvironment(project="x", size=40, cache_dir=None, retries=1)
+        env._ee = ee
+        return env
+
+    monkeypatch.setattr(run_gee, "make_env", env_with_stub)
+    assert run_gee.main(["--check", "2023-08-15", "--out", str(tmp_path)]) == 0
+    out = capsys.readouterr().out
+    assert "Rincian masker NDVI" in out and expected in out
+    assert "tidak ada (awan) 100.0%" in out and "tanah tanpa api 100.0%" in out
+
+
+def test_scan_fills_cache_for_replay(tmp_path, monkeypatch, capsys):
+    import run_gee
+
+    world = make_world(1, 20)
+    env = FakeGEE(world, cache_dir=tmp_path)
+    env.missing = {env.date_of(3)}
+    rows = list(env.scan(10))
+    assert len(rows) == 10 and rows[2][1] is None and "tidak ada citra" in rows[2][2]
+    assert rows[0][1]["ndvi_pct"] > 50 and len(list(tmp_path.glob("*.npz"))) == 9
+
+    replay = FakeGEE(world, cache_dir=tmp_path)
+    replay.day = 10
+    replay.download(5)
+    assert replay.calls == []  # replay memakai hasil scan dari cache
+
+    monkeypatch.setattr(run_gee, "make_env", lambda args: FakeGEE(world))
+    assert run_gee.main(["--scan", "8", "--days", "20"]) == 0
+    assert "hari punya NDVI bersih" in capsys.readouterr().out
