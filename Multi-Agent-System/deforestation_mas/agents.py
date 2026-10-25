@@ -34,9 +34,10 @@ from .messaging import CANCEL, CONFIRM, INFORM, PROPOSE, REQUEST, Message
 PENDING, CONFIRMED, DISMISSED, UNCERTAIN = "pending", "confirmed", "dismissed", "uncertain"
 
 
-def reference_window(day: int) -> range:
-    """Hari-hari 'minggu lalu' yang dijadikan acuan: H-9 sampai H-5."""
-    return range(day - 9, day - 4)
+def reference_window(day: int, lags: tuple[int, int] = (9, 5)) -> range:
+    """Langkah-langkah acuan dari ``day - lags[0]`` sampai ``day - lags[1]``.
+    Bawaan (9, 5): hari 'minggu lalu', H-9 sampai H-5. Untuk siklus 2 minggu, (2, 1): dua periode sebelumnya."""
+    return range(day - lags[0], day - lags[1] + 1)
 
 
 @dataclass
@@ -181,9 +182,17 @@ class ChangeDetectionAgent(MonitorAgent):
 
     # -- deteksi -------------------------------------------------------------
     def reference_composite(self, day: int) -> np.ndarray | None:
-        stack = [self.model.archive[d].ndvi for d in reference_window(day) if d in self.model.archive]
+        days = reference_window(day, self.model.reference_lags)
+        stack = [self.model.archive[d].ndvi for d in days if d in self.model.archive]
         if len(stack) < 2:
             return None
+        if self.model.reference_mode == "latest":
+            # Pengamatan bersih terakhir per piksel: periode sebelumnya, bila berawan mundur ke yang lebih lama.
+            # Kehilangan yang sudah terjadi pada periode sebelumnya tidak terdeteksi ulang sebagai "baru".
+            ref = stack[-1].copy()
+            for older in reversed(stack[:-1]):
+                ref = np.where(np.isnan(ref), older, ref)
+            return ref
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)  # piksel yang tertutup awan di semua hari acuan
             return np.nanmedian(np.stack(stack), axis=0)
@@ -195,14 +204,33 @@ class ChangeDetectionAgent(MonitorAgent):
         diff = ref - self.model.archive[day].ndvi
         cand = ndimage.binary_opening(diff > self.drop_threshold, structure=CROSS)
         labels, n = ndimage.label(cand, structure=EIGHT)
+        if n == 0:
+            return
+        # Ukuran dan letak tiap wilayah dihitung sekali (cepat untuk citra jutaan piksel).
+        sizes = np.bincount(labels.ravel(), minlength=n + 1)
+        boxes = ndimage.find_objects(labels)
         for lab in range(1, n + 1):
-            region = labels == lab
-            if region.sum() < self.min_pixels:
+            if sizes[lab] < self.min_pixels:
                 continue
-            r, c = ndimage.center_of_mass(region)
+            box = boxes[lab - 1]
+            rr, cc = np.nonzero(labels[box] == lab)
+            r = box[0].start + rr.mean()
             if not (self.rows[0] <= r < self.rows[1]):
                 continue  # milik detektor lain
+            region = np.zeros(labels.shape, dtype=bool)
+            region[box] = labels[box] == lab
             self._handle_region(day, region, ref, diff)
+
+    def resolve_pending(self):
+        """Baca vonis yang baru tiba dan coba putuskan kasus pada langkah yang sama.
+        Dipakai pada siklus 2 minggu agar kebakaran tidak menunggu satu periode lagi."""
+        for msg in self.inbox():
+            if msg.topic == "new_scene":
+                self.queue.extend(msg.content["days"])
+            elif msg.topic == "verdict":
+                self._receive_verdict(msg)
+        for case in self.my_cases(PENDING):
+            self._try_resolve(case)
 
     def _handle_region(self, day, region, ref, diff):
         # Kasus lama hanya "menutupi" deteksi baru selama kehilangannya belum
@@ -433,15 +461,21 @@ class ValidationAgent(MonitorAgent):
         ``fire_lookback`` hari terakhir). ``None`` bila tidak ada pengamatan titik api yang cukup."""
         if not self.has_fire_data:
             return None
-        zone = mask
+        # Kerjakan hanya di sekitar wilayah kasus (potongan + margin), bukan di seluruh citra.
+        rows, cols = np.nonzero(mask)
+        if rows.size == 0:
+            return None
+        m = self.fire_buffer_px + 1
+        box = (slice(max(0, rows.min() - m), rows.max() + m + 1), slice(max(0, cols.min() - m), cols.max() + m + 1))
+        zone = mask[box]
         if self.fire_buffer_px > 0:
-            zone = ndimage.binary_dilation(mask, structure=EIGHT, iterations=self.fire_buffer_px)
+            zone = ndimage.binary_dilation(zone, structure=EIGHT, iterations=self.fire_buffer_px)
         best = None
         for d in range(day - self.fire_lookback, day + 1):
             f = self.fire.get(d)
             if f is None:
                 continue
-            vals = f[zone]
+            vals = f[box][zone]
             seen = np.isfinite(vals)  # NaN = awan / tidak diproses
             if seen.size == 0 or seen.mean() < self.fire_min_observed:
                 continue
@@ -451,7 +485,7 @@ class ValidationAgent(MonitorAgent):
 
     def _validate(self, req) -> bool:
         day, mask = req["day"], req["mask"]
-        ref_days = [d for d in reference_window(day) if d in self.thermal]
+        ref_days = [d for d in reference_window(day, self.model.reference_lags) if d in self.thermal]
         if day not in self.thermal or len(ref_days) < 2:
             return False  # data termal belum lengkap -> coba lagi besok
         with warnings.catch_warnings():

@@ -1,4 +1,4 @@
-"""Model Mesa: satu langkah = satu hari pemantauan."""
+"""Model Mesa: satu langkah = satu hari pemantauan (atau satu periode, mis. 2 minggu, pada SentinelEnvironment)."""
 
 from __future__ import annotations
 
@@ -35,12 +35,26 @@ class ForestMonitoringModel(mesa.Model):
         validator_kwargs: dict | None = None,
         verbose: bool = False,
         env=None,
+        reference_lags: tuple[int, int] = (9, 5),
+        resolve_after_validation: bool = False,
+        reference_mode: str = "median",
     ):
         """``env``: lingkungan data apa pun yang memenuhi antarmuka ``ForestEnvironment``
-        (misalnya ``GEEEnvironment``). Bila kosong, dipakai lingkungan sintetis."""
+        (misalnya ``GEEEnvironment``). Bila kosong, dipakai lingkungan sintetis.
+
+        ``reference_lags``: langkah acuan (dari, sampai) sebelum langkah sekarang; (9, 5) = H-9..H-5.
+        ``reference_mode``: "median" (median langkah acuan) atau "latest" (pengamatan bersih terakhir per
+        piksel; dipakai pada siklus 2 minggu agar kehilangan lama tidak terdeteksi ulang).
+        ``resolve_after_validation``: detektor membaca vonis validator pada langkah yang sama
+        (penting bila satu langkah = 2 minggu, agar kebakaran tidak tertunda satu periode)."""
         super().__init__(rng=seed)
         self.env = env if env is not None else ForestEnvironment(size=size, seed=seed, **(env_kwargs or {}))
-        size = self.env.size
+        rows = getattr(self.env, "shape", (self.env.size,))[0]  # grid boleh tidak persegi
+        self.reference_lags = tuple(reference_lags)
+        if reference_mode not in ("median", "latest"):
+            raise ValueError("reference_mode harus 'median' atau 'latest'")
+        self.reference_mode = reference_mode
+        self.resolve_after_validation = resolve_after_validation
         self.bus = MessageBus()
         self.archive: dict = {}  # citra yang sudah diunduh ("data lake")
         self.cases: dict = {}  # semua kasus (registry bersama)
@@ -49,7 +63,7 @@ class ForestMonitoringModel(mesa.Model):
         self.day = 0
 
         self.ingestion = DataIngestionAgent(self)
-        bounds = [round(i * size / n_detectors) for i in range(n_detectors + 1)]
+        bounds = [round(i * rows / n_detectors) for i in range(n_detectors + 1)]
         self.detectors = [
             ChangeDetectionAgent(self, f"detector-{i + 1}", (bounds[i], bounds[i + 1]), **(detector_kwargs or {}))
             for i in range(n_detectors)
@@ -88,6 +102,9 @@ class ForestMonitoringModel(mesa.Model):
         self.env.advance_day()
         self.day = self.env.day
         for agent_type in PIPELINE:
+            if agent_type is NotificationAgent and self.resolve_after_validation:
+                for det in self.detectors:
+                    det.resolve_pending()
             agents = self.agents_by_type.get(agent_type)
             if agents:
                 agents.do("step")

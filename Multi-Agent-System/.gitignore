@@ -4,3 +4,5 @@ output/*.csv
 output/*.json
 gee_cache/
 output_gee/
+pantau_cache/
+output_pantau/

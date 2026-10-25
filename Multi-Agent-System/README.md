@@ -96,7 +96,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 42 pengujian
+python -m pytest -q tests                             # 55 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
@@ -113,10 +113,14 @@ Multi-Agent-System/
 │   ├── agents.py        # 4 agen + logika konsensus
 │   ├── model.py         # mesa.Model: pipeline harian & DataCollector
 │   ├── evaluation.py    # recall, precision, akurasi penyebab, latensi
-│   └── gee_environment.py  # adapter data nyata Google Earth Engine (MODIS)
+│   ├── gee_environment.py  # adapter data nyata Google Earth Engine (MODIS, replay harian)
+│   ├── sentinel_environment.py  # periode 2 minggu: Sentinel-2 + titik api VIIRS
+│   └── region.py        # batas kecamatan GeoJSON + rasterisasi
 ├── tests/               # test_mas.py (simulasi), test_gee_adapter.py (adapter GEE)
 ├── run_simulation.py    # simulasi sintetis
 ├── run_gee.py           # replay pada data nyata GEE (--check untuk uji koneksi)
+├── run_pantau.py        # pemantauan 2 mingguan per kecamatan (Sentinel-2 + VIIRS)
+├── data/                # batas kecamatan Kabupaten Kubu Raya (GeoJSON)
 ├── requirements.txt
 └── requirements-gee.txt # tambahan untuk GEE
 ```
@@ -224,7 +228,59 @@ tiruan (`tests/test_gee_adapter.py`). Panggilan ke server GEE sungguhan (ekspres
 belum bisa diuji otomatis; gunakan `--check` untuk memastikannya di akun Anda. Ambang (`drop_threshold`,
 `persist_threshold`, dst.) masih nilai awal dan perlu dikalibrasi pada kejadian nyata.
 
-## 9. Ide pengembangan berikutnya
+## 9. 📡 Pemantauan 2 mingguan Kabupaten Kubu Raya (Sentinel-2 + VIIRS)
+
+Mode ini memantau **data terbaru** setiap 2 minggu untuk **satu kecamatan** di Kabupaten Kubu Raya
+(atau semuanya), memakai batas kecamatan di `data/kubu_raya_kecamatan.geojson`. Mode ini menggantikan MODIS:
+NASA mengumumkan Terra dan Aqua (pembawa MODIS) mulai dimatikan pada akhir 2026/awal 2027.
+
+**Data per periode 2 minggu**
+
+| Bukti | Koleksi GEE | Pemrosesan |
+| :--- | :--- | :--- |
+| NDVI 30 m (bawaan) | `COPERNICUS/S2_SR_HARMONIZED` | komposit median periode; piksel berawan dibuang dengan Cloud Score+ (`GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED`, `cs_cdf` ≥ 0,6) |
+| Masker hutan | `ESA/WorldCover/v200` (2021) | hanya tutupan pohon (10) dan mangrove (95) yang dipantau, agar panen sawah/kebun tidak menjadi alarm palsu |
+| Titik api | `NASA/LANCE/SNPP_VIIRS/C2` + `NASA/LANCE/NOAA20_VIIRS/C2` | ada titik api berkeyakinan nominal/tinggi dalam periode = bukti kebakaran |
+
+**Cara kerja satu putaran**
+- Periode memakai kalender tetap 14 hari. Satu putaran memproses 4 periode lengkap terakhir: 2 periode
+  acuan dan 2 periode yang dipantau. Satu langkah Mesa = satu periode.
+- Acuan = **pengamatan bersih terakhir** per piksel (periode sebelumnya; bila berawan, mundur satu periode),
+  sehingga kehilangan yang sudah dilaporkan tidak terdeteksi ulang pada putaran berikutnya.
+- **Kebakaran dikonfirmasi pada periode yang sama** (penurunan NDVI + titik api VIIRS di lokasi itu).
+- **Tebang liar dikonfirmasi** bila periode berikutnya membuktikan kehilangan menetap; bila NDVI pulih
+  (kabut, awan tipis), kasus ditolak. Kasus di periode terakhir menunggu putaran berikutnya.
+- Peringatan baru ditambahkan ke `riwayat_peringatan.json` per kecamatan; menjalankan ulang tidak menggandakan.
+
+**Menjalankan**
+```bash
+python run_pantau.py --list                                     # daftar 9 kecamatan
+python run_pantau.py --project PROJECT-ID --status              # tanggal data terbaru tiap sumber
+python run_pantau.py --project PROJECT-ID --kecamatan "Sungai Raya"
+python run_pantau.py --project PROJECT-ID --kecamatan semua
+python run_pantau.py --project PROJECT-ID --kecamatan "Sungai Raya" --end-date 2023-10-15   # uji historis
+```
+Di Windows: klik ganda `Pantau_Kubu_Raya.bat` di root repositori (memilih kecamatan secara interaktif), atau
+`Pantau_Kubu_Raya.bat "Sungai Raya"`. Atur Project ID sekali dengan `setx EE_PROJECT "project-id-anda"`.
+
+**Menjadwalkan otomatis setiap 2 minggu (Windows Task Scheduler)**: Create Basic Task → Daily → *Recur every*
+14 days → Start a program: `Pantau_Kubu_Raya.bat`, *Add arguments*: `"Sungai Raya"`.
+
+**Hasil** di `output_pantau/<kecamatan>/`: `laporan_<periode>.json` (peringatan baru dan wilayah yang masih
+menunggu), `peta_<periode>.png` (NDVI acuan vs terbaru dengan penanda), `riwayat_peringatan.json`, dan
+`peringatan.geojson` (titik peringatan untuk QGIS / Google Earth).
+
+**Keterbatasan yang perlu diketahui**
+- "Terbaru" = periode 14 hari lengkap terakhir sebelum *hari ini - 3 hari* (jeda masuknya data ke GEE).
+  Jalankan `--status` untuk melihat apakah setiap sumber masih diperbarui.
+- Katalog GEE mencatat data titik api NOAA-20 hingga 13 September 2026 dan Suomi NPP hingga 19 Oktober 2026;
+  pengiriman data Suomi NPP dihentikan NASA pada 2 November 2026. Bila semua sumber titik api berhenti,
+  ringkasan menampilkan "tak ada data" dan kebakaran tidak dapat dikonfirmasi lewat jalur cepat.
+- Masker hutan berasal dari 2021: lahan yang sudah dibuka sejak 2021 tidak lagi dipantau.
+- Uji otomatis memakai data periode tiruan dan objek `ee` palsu; panggilan ke server GEE sungguhan belum
+  teruji dari lingkungan pengembangan.
+
+## 10. Ide pengembangan berikutnya
 
 - **Agen Masker Awan** khusus yang memakai band QA citra, sehingga lebih sedikit kasus awan yang masuk validasi.
 - **Agen Validasi kedua** berbasis radar (Sentinel-1) yang bisa melihat menembus awan, untuk menyelesaikan kasus *uncertain*.
