@@ -1,4 +1,4 @@
-﻿#ifndef forward_rules_h
+#ifndef forward_rules_h
 #define forward_rules_h
 
 #include <queue>
@@ -16,9 +16,11 @@ public:
         for ( auto diagnosis_ailment_pair : chain_forward.diagnosis_ailment) {
             if ( diagnosis_index == diagnosis_ailment_pair.first){
                 std::vector<int> ailments_index = diagnosis_ailment_pair.second;
+                int condition_idx = 0; // local index into ailment_condition[diagnosis_index]
                 for ( auto ailment_number : ailments_index){
-                    chain_forward.variable_initialized_list[ailment_number].second = chain_forward.ailment_condition[diagnosis_index][ailment_number];
+                    chain_forward.variable_initialized_list[ailment_number].second = chain_forward.ailment_condition[diagnosis_index][condition_idx];
                     variables_initialized_queue.push(chain_forward.variable_initialized_list[ailment_number]);
+                    condition_idx++;
                 }
             }
         }

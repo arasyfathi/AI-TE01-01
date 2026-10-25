@@ -1,4 +1,4 @@
-﻿# 🤖 Repositori Tugas Mata Kuliah Kecerdasan Buatan (AI-TE01)
+# 🤖 Repositori Tugas Mata Kuliah Kecerdasan Buatan (AI-TE01)
 
 <p align="center">
   <img src="https://cdn.pixabay.com/animation/2022/08/06/11/57/11-57-26-645_512.gif" alt="AI Project Banner" width="460">
@@ -255,7 +255,21 @@ AI-TE01/
 
 ### 1. Menjalankan Sistem Pakar (Expert System)
 
-#### Opsi A: Langsung Eksekusi Binary Mandiri (Tanpa Perlu Compile)
+#### Opsi A: Antarmuka Web Interaktif (Modern CDSS Web UI)
+Cukup klik ganda (double-click) file skrip di root:
+```powershell
+.\Jalankan_Web_Sistem_Pakar.bat
+```
+Atau buka langsung file HTML di browser modern pilihan Anda:
+```
+Expert-System-Implementation-main/web-ui/index.html
+```
+Fitur Web UI CDSS:
+* **Guided Wizard** (Anamnesis terpandu step-by-step) & **Rapid Matrix** (Cheatsheet cepat 21 gejala).
+* **Live Working Memory** & **Hypothesis Tracker** (Prediksi probabilitas kecocokan diagnosis penyakit secara real-time).
+* **Ekspor Laporan PDF Medis & Riwayat Konsultasi (Local Audit Log)**.
+
+#### Opsi B: Eksekusi Binary Mandiri CLI (Tanpa Perlu Compile)
 Buka terminal PowerShell atau Command Prompt pada folder proyek:
 
 ```powershell
@@ -263,7 +277,7 @@ cd Expert-System-Implementation-main\Project1-SubmittedFiles
 .\expert_system.exe
 ```
 
-#### Opsi B: Kompilasi Ulang dari Sumber Kode C++
+#### Opsi C: Kompilasi Ulang dari Sumber Kode C++
 Jika ingin mengompilasi ulang kode sumber:
 
 ```powershell

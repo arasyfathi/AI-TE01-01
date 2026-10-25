@@ -1,0 +1,260 @@
+/* ============================================================
+   CardioExpert CDSS — styles.css  v2
+   Custom styles complementing Tailwind CSS
+   ============================================================ */
+
+/* ── Print Styles (Formal White Paper) ── */
+@media print {
+  body { background: #fff !important; color: #1e293b !important; font-family: 'Plus Jakarta Sans', sans-serif; }
+  aside, header, .no-print, #print-overlay, #history-modal { display: none !important; }
+  main { margin-left: 0 !important; }
+  .section-page { display: none !important; }
+  #print-overlay { display: block !important; position: static !important; background: transparent !important; }
+  #print-overlay > div { box-shadow: none !important; border-radius: 0 !important; max-height: none !important; border: none !important; }
+  #print-content { color: #1e293b; }
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: #0d1526; }
+::-webkit-scrollbar-thumb { background: #1c2b52; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #0284c7; }
+
+/* ── Section Visibility ── */
+.section-page { display: none; }
+.section-page.active { display: flex; flex-direction: column; }
+
+/* ── Sidebar Input ── */
+.sidebar-input {
+  width: 100%;
+  background: #111b33;
+  border: 1px solid rgba(71, 85, 105, 0.5);
+  border-radius: 0.5rem;
+  padding: 0.4rem 0.75rem;
+  font-size: 0.8125rem;
+  color: white;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.sidebar-input::placeholder { color: #475569; }
+.sidebar-input:focus {
+  border-color: #0ea5e9;
+  box-shadow: 0 0 0 2px rgba(14,165,233,0.12);
+}
+
+/* ── Nav Buttons ── */
+.nav-btn { color: #94a3b8; }
+.nav-btn:hover { background: rgba(14,165,233,0.08); color: #e2e8f0; }
+.nav-btn.active { background: rgba(14,165,233,0.15); color: #38bdf8; box-shadow: inset 0 0 0 1px rgba(14,165,233,0.25); }
+
+/* ── Mode Toggle ── */
+.mode-btn { color: #64748b; background: transparent; }
+.mode-btn:hover { color: #cbd5e1; background: rgba(255,255,255,0.04); }
+.mode-btn.active { background: rgba(14,165,233,0.18); color: #38bdf8; }
+
+/* ── Run Button ── */
+.run-btn { background: linear-gradient(135deg, #0369a1, #0ea5e9); }
+.run-btn:not(:disabled):hover { background: linear-gradient(135deg, #0284c7, #38bdf8); transform: translateY(-1px); }
+.run-btn:disabled { cursor: not-allowed; }
+
+/* ── Keyboard Key ── */
+.kbd-key {
+  background: #162040;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 1px 6px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+/* ── Log Filter Tabs ── */
+.log-filter { color: #64748b; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06); }
+.log-filter:hover { color: #cbd5e1; background: rgba(255,255,255,0.06); }
+.log-filter.active { background: rgba(14,165,233,0.18); color: #38bdf8; border-color: rgba(14,165,233,0.3); }
+
+/* ── Knowledge Base Tab ── */
+.kb-tab { color: #64748b; background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.07); }
+.kb-tab:hover { color: #cbd5e1; background: rgba(255,255,255,0.06); }
+.kb-tab.active { background: rgba(14,165,233,0.18); color: #38bdf8; border-color: rgba(14,165,233,0.3); }
+
+/* ── Working Memory Log Entries ── */
+.wm-entry {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.375rem 0.625rem;
+  border-radius: 0.5rem;
+  font-size: 0.6875rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  border: 1px solid transparent;
+  user-select: none;
+}
+.wm-entry[data-state="null"] {
+  background: rgba(17,27,51,0.4);
+  color: #475569;
+  border-color: rgba(51,65,85,0.3);
+}
+.wm-entry[data-state="null"]:hover {
+  background: rgba(14,165,233,0.06);
+  border-color: rgba(14,165,233,0.2);
+  color: #94a3b8;
+}
+.wm-entry[data-state="true"] {
+  background: rgba(16,185,129,0.08);
+  border-color: rgba(16,185,129,0.25);
+  color: #34d399;
+}
+.wm-entry[data-state="true"]:hover { background: rgba(16,185,129,0.14); }
+.wm-entry[data-state="false"] {
+  background: rgba(71,85,105,0.2);
+  border-color: rgba(71,85,105,0.3);
+  color: #475569;
+  text-decoration: line-through;
+  text-decoration-color: #334155;
+}
+.wm-entry[data-state="false"]:hover { background: rgba(239,68,68,0.06); border-color: rgba(239,68,68,0.2); color: #ef4444; text-decoration: none; }
+
+.wm-entry .wm-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.wm-entry[data-state="null"] .wm-dot { background: #334155; }
+.wm-entry[data-state="true"] .wm-dot { background: #10b981; box-shadow: 0 0 6px rgba(16,185,129,0.5); }
+.wm-entry[data-state="false"] .wm-dot { background: #475569; }
+
+.wm-entry .wm-badge {
+  margin-left: auto;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+.wm-entry[data-state="null"] .wm-badge { background: rgba(51,65,85,0.5); color: #475569; }
+.wm-entry[data-state="true"] .wm-badge { background: rgba(16,185,129,0.2); color: #34d399; }
+.wm-entry[data-state="false"] .wm-badge { background: rgba(239,68,68,0.1); color: #ef4444; }
+
+/* ── Hypothesis Tracker ── */
+.hypo-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.hypo-bar-track {
+  width: 100%;
+  height: 6px;
+  background: rgba(17,27,51,0.8);
+  border-radius: 99px;
+  overflow: hidden;
+}
+.hypo-bar-fill {
+  height: 100%;
+  border-radius: 99px;
+  transition: width 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* ── Matrix Symptom Checkbox ── */
+.matrix-item {
+  display: flex; align-items: center; gap: 0.5rem;
+  padding: 0.5rem 0.75rem; border-radius: 0.625rem;
+  border: 1px solid rgba(51,65,85,0.5);
+  background: rgba(17,27,51,0.5);
+  cursor: pointer; transition: all 0.12s ease; user-select: none;
+}
+.matrix-item:hover { border-color: rgba(14,165,233,0.3); background: rgba(14,165,233,0.06); }
+.matrix-item.selected { border-color: rgba(14,165,233,0.5); background: rgba(14,165,233,0.12); }
+.matrix-item .check-box {
+  width: 1rem; height: 1rem; border-radius: 4px;
+  border: 1.5px solid #334155;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  transition: all 0.12s ease;
+}
+.matrix-item.selected .check-box { background: #0ea5e9; border-color: #0ea5e9; }
+.matrix-item .check-icon { display: none; width: 0.625rem; height: 0.625rem; color: white; }
+.matrix-item.selected .check-icon { display: block; }
+.matrix-item .symptom-text { font-size: 0.6875rem; color: #94a3b8; line-height: 1.4; transition: color 0.12s; }
+.matrix-item.selected .symptom-text { color: #e2e8f0; }
+
+/* ── Diagnosis Card Colors ── */
+.diag-card-heart-failure  { border-color: rgba(239,68,68,0.3);  background: linear-gradient(135deg, rgba(239,68,68,0.06),  rgba(13,21,38,0.95)); }
+.diag-icon-heart-failure  { background: rgba(239,68,68,0.15);   border: 1px solid rgba(239,68,68,0.3);  color: #f87171; }
+.diag-card-cardiomyopathy { border-color: rgba(245,158,11,0.3); background: linear-gradient(135deg, rgba(245,158,11,0.06), rgba(13,21,38,0.95)); }
+.diag-icon-cardiomyopathy { background: rgba(245,158,11,0.15);  border: 1px solid rgba(245,158,11,0.3); color: #fbbf24; }
+.diag-card-angina         { border-color: rgba(251,191,36,0.3); background: linear-gradient(135deg, rgba(251,191,36,0.06), rgba(13,21,38,0.95)); }
+.diag-icon-angina         { background: rgba(251,191,36,0.15);  border: 1px solid rgba(251,191,36,0.3); color: #fcd34d; }
+.diag-card-coronary       { border-color: rgba(239,68,68,0.3);  background: linear-gradient(135deg, rgba(239,68,68,0.07),  rgba(13,21,38,0.95)); }
+.diag-icon-coronary       { background: rgba(239,68,68,0.15);   border: 1px solid rgba(239,68,68,0.3);  color: #fca5a5; }
+.diag-card-tachycardia    { border-color: rgba(139,92,246,0.3); background: linear-gradient(135deg, rgba(139,92,246,0.06), rgba(13,21,38,0.95)); }
+.diag-icon-tachycardia    { background: rgba(139,92,246,0.15);  border: 1px solid rgba(139,92,246,0.3); color: #c4b5fd; }
+.diag-card-ventricular    { border-color: rgba(244,63,94,0.3);  background: linear-gradient(135deg, rgba(244,63,94,0.08),  rgba(13,21,38,0.95)); }
+.diag-icon-ventricular    { background: rgba(244,63,94,0.15);   border: 1px solid rgba(244,63,94,0.3);  color: #fb7185; }
+
+/* ── Treatment Cards ── */
+.treat-card {
+  background: rgba(17,27,51,0.7); border: 1px solid rgba(51,65,85,0.5);
+  border-radius: 1rem; padding: 1rem; transition: border-color 0.2s, transform 0.2s;
+}
+.treat-card:hover { border-color: rgba(14,165,233,0.35); transform: translateY(-1px); }
+
+/* ── Urgency Badges ── */
+.urgency-critical { background: rgba(239,68,68,0.15); color: #f87171; border: 1px solid rgba(239,68,68,0.3); }
+.urgency-high     { background: rgba(245,158,11,0.15); color: #fbbf24; border: 1px solid rgba(245,158,11,0.3); }
+.urgency-moderate { background: rgba(14,165,233,0.15); color: #38bdf8; border: 1px solid rgba(14,165,233,0.3); }
+
+/* ── Inference Trace Steps ── */
+.trace-step {
+  display: flex; gap: 0.625rem; align-items: flex-start;
+  padding: 0.625rem 0.875rem; border-radius: 0.625rem;
+  font-size: 0.75rem;
+  background: rgba(17,27,51,0.5); border: 1px solid rgba(51,65,85,0.4);
+  animation: slideUp 0.25s ease-out;
+}
+.trace-step.success { border-color: rgba(16,185,129,0.25); background: rgba(16,185,129,0.05); }
+.trace-step.fail    { border-color: rgba(71,85,105,0.35); opacity: 0.65; }
+.trace-step.active  { border-color: rgba(14,165,233,0.3); background: rgba(14,165,233,0.05); }
+
+/* ── Differential Diagnosis ── */
+.diff-item {
+  display: flex; align-items: center; gap: 0.75rem;
+  padding: 0.75rem 1rem; border-radius: 0.75rem;
+  background: rgba(17,27,51,0.5); border: 1px solid rgba(51,65,85,0.4);
+  animation: slideUp 0.3s ease-out;
+}
+
+/* ── History Items ── */
+.history-item {
+  padding: 0.875rem 1rem; border-radius: 0.75rem;
+  background: rgba(17,27,51,0.6); border: 1px solid rgba(51,65,85,0.4);
+  transition: border-color 0.15s;
+}
+.history-item:hover { border-color: rgba(14,165,233,0.3); }
+
+/* ── Preset Menu ── */
+.preset-option {
+  display: flex; align-items: center; gap: 0.625rem;
+  padding: 0.625rem 1rem; width: 100%;
+  font-size: 0.8125rem; color: #94a3b8;
+  transition: background 0.12s, color 0.12s;
+  text-align: left;
+}
+.preset-option:hover { background: rgba(14,165,233,0.08); color: #e2e8f0; }
+.preset-option .preset-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+}
+
+/* ── Table Rows ── */
+#kb-backward-tbody tr, #kb-forward-tbody tr { transition: background 0.1s; }
+#kb-backward-tbody tr:hover, #kb-forward-tbody tr:hover { background: rgba(14,165,233,0.04); }
+
+/* ── Terminal Cursor ── */
+.terminal-cursor { display: inline-block; width: 8px; height: 1em; background: #22c55e; animation: blink 1s step-end infinite; vertical-align: text-bottom; }
+@keyframes blink { 0%,100%{opacity:1}50%{opacity:0} }
+
+/* ── Animations ── */
+@keyframes fadeIn  { from{opacity:0} to{opacity:1} }
+@keyframes slideUp { from{opacity:0;transform:translateY(14px)} to{opacity:1;transform:translateY(0)} }
