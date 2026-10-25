@@ -44,6 +44,10 @@ def parse_args(argv=None):
     p.add_argument("--latency", type=int, default=0, help="jeda ketersediaan data (hari)")
     p.add_argument("--check", nargs="?", const="", metavar="TANGGAL", help="uji satu hari lalu keluar")
     p.add_argument("--scan", type=int, metavar="N", help="periksa N hari pertama (mengisi cache) lalu keluar")
+    p.add_argument("--find-fires", action="store_true",
+                   help="cari area dengan titik api MODIS terbanyak selama --start/--days di dalam --bbox, lalu keluar")
+    p.add_argument("--bbox", default="110.7,-3.6,115.9,0.8",
+                   help="kotak pencarian: bujur_min,lintang_min,bujur_maks,lintang_maks (default: Kalimantan Tengah)")
     p.add_argument("--keep-haze", action="store_true",
                    help="jangan buang piksel beraerosol/asap tinggi dan bercirrus tinggi dari NDVI")
     p.add_argument("--detectors", type=int, default=1)
@@ -165,6 +169,41 @@ def print_diagnosis(env, date, args):
         print("Kesimpulan: area ini memang tertutup awan hari itu. Coba tanggal lain atau jalankan --scan untuk mencari hari cerah.")
 
 
+def run_find_fires(args) -> int:
+    import datetime as dt
+
+    env = make_env(args)
+    try:
+        bbox = tuple(float(x) for x in args.bbox.split(","))
+        assert len(bbox) == 4 and bbox[0] < bbox[2] and bbox[1] < bbox[3]
+    except (ValueError, AssertionError):
+        print("GAGAL: --bbox harus berformat bujur_min,lintang_min,bujur_maks,lintang_maks")
+        return 1
+    print(f"Mencari titik api MODIS (MOD14A1) {env.date_of(1)} s.d. {env.date_of(args.days)} "
+          f"di kotak bujur {bbox[0]}..{bbox[2]}, lintang {bbox[1]}..{bbox[3]} ...")
+    try:
+        spots = env.find_fire_hotspots(bbox)
+    except Exception as exc:  # noqa: BLE001
+        print(f"\nGAGAL: {type(exc).__name__}: {exc}")
+        return 1
+    if not spots:
+        print("\nTidak ada titik api di kotak dan periode ini. Coba periode lain (--start/--days) atau --bbox lain.")
+        return 0
+    km = args.size * args.pixel / 1000
+    print(f"\nArea {km:g} x {km:g} km dengan titik api terbanyak (hari-piksel = jumlah piksel ~1 km x hari menyala):")
+    print(f"{'no':>3s}{'lintang':>10s}{'bujur':>10s}{'hari-piksel':>13s}{'api pertama':>14s}{'api terakhir':>14s}")
+    for i, s in enumerate(spots, 1):
+        print(f"{i:>3d}{s['lat']:>10.3f}{s['lon']:>10.3f}{s['fire_pixel_days']:>13d}"
+              f"{s['first_date'] or '-':>14s}{s['last_date'] or '-':>14s}")
+    best = spots[0]
+    start = (dt.date.fromisoformat(best["first_date"]) - dt.timedelta(days=10)).isoformat() if best["first_date"] else args.start
+    project = f" --project {args.project}" if args.project else ""
+    print("\nLangkah berikutnya untuk kandidat #1 (mulai 10 hari sebelum api pertama agar ada citra acuan):")
+    print(f"  python run_gee.py{project} --lat {best['lat']} --lon {best['lon']} --start {start} --keep-haze --scan 30")
+    print(f"  python run_gee.py{project} --lat {best['lat']} --lon {best['lon']} --start {start} --keep-haze --days 60")
+    return 0
+
+
 def run_scan(args) -> int:
     env = make_env(args)
     n = min(args.scan, args.days)
@@ -230,6 +269,8 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     if args.check is not None:
         return run_check(args)
+    if args.find_fires:
+        return run_find_fires(args)
     if args.scan:
         return run_scan(args)
 

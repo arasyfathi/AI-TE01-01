@@ -42,6 +42,8 @@ COLLECTIONS = {
     "fire": "MODIS/061/MOD14A1",
 }
 M_PER_DEG = 111_320.0
+# Kotak kira-kira Provinsi Kalimantan Tengah: (bujur_min, lintang_min, bujur_maks, lintang_maks)
+KALTENG_BBOX = (110.7, -3.6, 115.9, 0.8)
 
 
 class GEEEnvironment:
@@ -223,7 +225,7 @@ class GEEEnvironment:
         self.errors.append(f"{date}: {type(last).__name__}: {last}")
         return None
 
-    def _decode(self, arr, names=BANDS) -> dict[str, np.ndarray]:
+    def _decode(self, arr, names=BANDS, shape=None) -> dict[str, np.ndarray]:
         """Ubah keluaran computePixels (larik terstruktur atau (H, W, B)) menjadi bidang per band, NODATA -> NaN."""
         if getattr(arr, "dtype", None) is not None and arr.dtype.names:
             planes = [np.asarray(arr[name], dtype=float) for name in names]
@@ -234,8 +236,9 @@ class GEEEnvironment:
             planes = [a[..., i] for i in range(len(names))]
         out = {}
         for name, plane in zip(names, planes):
-            if plane.shape != (self.size, self.size):
-                raise ValueError(f"ukuran {name} {plane.shape}, diharapkan {(self.size, self.size)}")
+            expected = shape or (self.size, self.size)
+            if plane.shape != tuple(expected):
+                raise ValueError(f"ukuran {name} {plane.shape}, diharapkan {tuple(expected)}")
             out[name] = np.where(plane <= NODATA + 0.5, np.nan, plane).astype(np.float32)
         return out
 
@@ -381,3 +384,75 @@ class GEEEnvironment:
                 "fire_obs_pct": round(100 * float(np.isfinite(fire).mean()), 1),
                 "fire_px": int(np.nansum(fire > 0.5)),
             }, None
+
+    # ------------------------------------------------------- pencarian titik api
+    def find_fire_hotspots(
+        self,
+        bbox: tuple[float, float, float, float] = KALTENG_BBOX,
+        top: int = 5,
+        cell_deg: float = 0.01,
+    ) -> list[dict]:
+        """Cari area seukuran jendela pemantauan (``size`` x ``pixel_m``) dengan titik api MODIS terbanyak
+        di dalam ``bbox`` = (bujur_min, lintang_min, bujur_maks, lintang_maks) selama periode replay.
+
+        Satu permintaan ke GEE: jumlah hari-api per piksel ~1 km (MOD14A1 kelas 7-9) beserta hari api
+        pertama/terakhir. Penjumlahan per jendela dan pemilihan kandidat dilakukan di komputer sendiri."""
+        ee = self.connect()
+        lon_min, lat_min, lon_max, lat_max = bbox
+        width = int(math.ceil((lon_max - lon_min) / cell_deg))
+        height = int(math.ceil((lat_max - lat_min) / cell_deg))
+        start = ee.Date(self.date_of(1))
+        col = ee.ImageCollection(COLLECTIONS["fire"]).filterDate(start, ee.Date(self.date_of(self.n_days + 1)))
+
+        def per_day(img):
+            fire = img.select("FireMask").gte(7)
+            day = ee.Image(img.date().difference(start, "day")).toFloat().updateMask(fire)
+            return fire.toFloat().rename("count").addBands(day.rename("day"))
+
+        days = col.map(per_day)
+        image = (
+            days.select("count").sum().rename("count")
+            .addBands(days.select("day").min().rename("first"))
+            .addBands(days.select("day").max().rename("last"))
+            .toFloat().unmask(NODATA)
+        )
+        grid = {
+            "dimensions": {"width": width, "height": height},
+            "affineTransform": {"scaleX": cell_deg, "shearX": 0, "translateX": lon_min,
+                                "shearY": 0, "scaleY": -cell_deg, "translateY": lat_max},
+            "crsCode": "EPSG:4326",
+        }
+        arr = ee.data.computePixels({"expression": image, "fileFormat": "NUMPY_NDARRAY", "grid": grid})
+        planes = self._decode(arr, ("count", "first", "last"), shape=(height, width))
+        return self._rank_hotspots(planes, bbox, cell_deg, top)
+
+    def _rank_hotspots(self, planes, bbox, cell_deg, top) -> list[dict]:
+        from scipy import ndimage
+
+        lon_min, _, _, lat_max = bbox
+        count = np.nan_to_num(planes["count"], nan=0.0)
+        win = max(1, int(round(self.size * self.pixel_m / M_PER_DEG / cell_deg)))  # jendela pemantauan, dalam sel
+        score = ndimage.uniform_filter(count, size=win, mode="constant") * win * win
+        results = []
+        for _ in range(top):
+            r, c = np.unravel_index(int(np.argmax(score)), score.shape)
+            if score[r, c] <= 0:
+                break
+            h = win // 2
+            rows = slice(max(0, r - h), r - h + win)
+            cols = slice(max(0, c - h), c - h + win)
+            first = planes["first"][rows, cols]
+            last = planes["last"][rows, cols]
+            # Banyak posisi jendela bisa sama-sama "terbaik"; laporkan pusat massa api di dalamnya
+            # agar api berada di tengah area pemantauan, bukan menempel di tepinya.
+            cr, cc = ndimage.center_of_mass(count[rows, cols])
+            cr, cc = rows.start + cr, cols.start + cc
+            results.append({
+                "lat": round(lat_max - (cr + 0.5) * cell_deg, 3),
+                "lon": round(lon_min + (cc + 0.5) * cell_deg, 3),
+                "fire_pixel_days": int(round(score[r, c])),
+                "first_date": self.date_of(int(np.nanmin(first)) + 1) if np.isfinite(first).any() else None,
+                "last_date": self.date_of(int(np.nanmax(last)) + 1) if np.isfinite(last).any() else None,
+            })
+            score[max(0, r - win):r + win + 1, max(0, c - win):c + win + 1] = 0  # kandidat tidak saling tumpang
+        return results

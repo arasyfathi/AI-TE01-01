@@ -413,3 +413,55 @@ def test_scan_fills_cache_for_replay(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(run_gee, "make_env", lambda args: FakeGEE(world))
     assert run_gee.main(["--scan", "8", "--days", "20"]) == 0
     assert "hari punya NDVI bersih" in capsys.readouterr().out
+
+
+def _fire_grid(h=100, w=100, blobs=()):
+    arr = np.zeros((h, w), dtype=[("count", "f4"), ("first", "f4"), ("last", "f4")])
+    arr["first"] = NODATA
+    arr["last"] = NODATA
+    for (r0, r1, c0, c1, n, first, last) in blobs:
+        arr["count"][r0:r1, c0:c1] = n
+        arr["first"][r0:r1, c0:c1] = first
+        arr["last"][r0:r1, c0:c1] = last
+    return arr
+
+
+BLOBS = ((20, 26, 60, 66, 5, 10, 20), (70, 73, 10, 13, 3, 30, 35))
+
+
+def test_find_fire_hotspots_ranks_planted_fires():
+    ee = _stub_ee()
+    ee.data.computePixels.return_value = _fire_grid(blobs=BLOBS)
+    env = GEEEnvironment(project="x", start="2023-08-15", n_days=60, cache_dir=None)
+    env._ee = ee
+    spots = env.find_fire_hotspots(bbox=(113.0, -3.0, 114.0, -2.0))
+    assert len(spots) == 2  # hanya dua kumpulan api; sisanya kosong
+    a, b = spots
+    assert a["fire_pixel_days"] == 36 * 5 and b["fire_pixel_days"] == 9 * 3
+    assert a["lat"] == pytest.approx(-2.0 - 23 * 0.01, abs=0.03) and a["lon"] == pytest.approx(113.63, abs=0.03)
+    assert b["lat"] == pytest.approx(-2.0 - 71.5 * 0.01, abs=0.03) and b["lon"] == pytest.approx(113.115, abs=0.03)
+    assert (a["first_date"], a["last_date"]) == ("2023-08-25", "2023-09-04")
+    grid = ee.data.computePixels.call_args[0][0]["grid"]
+    assert grid["dimensions"] == {"width": 100, "height": 100}
+
+
+def test_find_fires_cli(monkeypatch, capsys):
+    import run_gee
+
+    ee = _stub_ee()
+    ee.data.computePixels.side_effect = [_fire_grid(blobs=BLOBS), _fire_grid()]
+
+    def env_with_stub(args):
+        env = run_gee.GEEEnvironment(project=args.project, start=args.start, n_days=args.days, cache_dir=None)
+        env._ee = ee
+        return env
+
+    monkeypatch.setattr(run_gee, "make_env", env_with_stub)
+    argv = ["--project", "p", "--find-fires", "--bbox", "113,-3,114,-2", "--days", "60"]
+    assert run_gee.main(argv) == 0
+    out = capsys.readouterr().out
+    assert "--lat -2.23" in out and "--start 2023-08-15" in out and "--keep-haze --scan 30" in out
+
+    assert run_gee.main(argv) == 0  # tanpa titik api sama sekali
+    assert "Tidak ada titik api" in capsys.readouterr().out
+    assert run_gee.main(["--find-fires", "--bbox", "1,2,3"]) == 1

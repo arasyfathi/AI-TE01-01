@@ -96,7 +96,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 35 pengujian
+python -m pytest -q tests                             # 37 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
@@ -139,19 +139,25 @@ Akun GEE harus terhubung ke proyek Google Cloud; catat **Project ID**-nya.
 # 1) uji koneksi dan satu hari data (hanya 1 permintaan ke GEE)
 python run_gee.py --project PROJECT-ID --check
 
-# 2) periksa banyak hari: berapa persen area bebas awan tiap hari (sekaligus mengisi cache)
+# 2) cari area 10 x 10 km dengan titik api MODIS terbanyak (default: seluruh Kalimantan Tengah)
+python run_gee.py --project PROJECT-ID --find-fires --start 2023-08-01 --days 92
+
+# 3) periksa banyak hari: berapa persen area bebas awan tiap hari (sekaligus mengisi cache)
 python run_gee.py --project PROJECT-ID --scan 30
 
-# 3) replay periode (hasil unduhan di-cache di gee_cache/, jadi pengulangan tidak memakai kuota)
+# 4) replay periode (hasil unduhan di-cache di gee_cache/, jadi pengulangan tidak memakai kuota)
 python run_gee.py --project PROJECT-ID --days 60
 
-# 4) ganti wilayah/periode, pertahankan piksel berasap, atau kalibrasi ambang
+# 5) ganti wilayah/periode, pertahankan piksel berasap, atau kalibrasi ambang
 python run_gee.py --project PROJECT-ID --keep-haze --scan 30
 python run_gee.py --project PROJECT-ID --lat -2.35 --lon 114.0 --start 2023-08-15 --days 90
 python run_gee.py --project PROJECT-ID --drop-threshold 0.15 --persist-threshold 0.10
 ```
 `--project` boleh dikosongkan bila variabel lingkungan `EE_PROJECT` sudah diatur. Hasil ada di `output_gee/`
 (`alerts.json` dengan tanggal asli, `timeseries.csv`, `gee_replay.png`; `--check` menyimpan `check.png`).
+`--find-fires` langsung mencetak perintah `--scan` dan replay untuk kandidat teratas.
+Pada uji di sekitar Palangka Raya (Agustus–September 2023), masker cirrus terbukti terlalu ketat:
+`--keep-haze` menaikkan hari cerah dari 5 menjadi 9 dari 30 hari, jadi opsi ini disarankan.
 Bila NDVI kosong, `--check` merinci penyebabnya (awan, bayangan awan, asap/aerosol tinggi, cirrus, atau celah
 lintasan satelit) dan menyarankan langkah berikutnya.
 Wilayah bawaan: 10 x 10 km di sekitar Palangka Raya, Kalimantan Tengah.
