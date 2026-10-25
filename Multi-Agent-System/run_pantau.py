@@ -50,8 +50,8 @@ def parse_args(argv=None):
     p.add_argument("--drop-threshold", type=float, default=0.20)
     p.add_argument("--persist-threshold", type=float, default=0.15)
     p.add_argument("--cloud-threshold", type=float, default=0.60, help="ambang Cloud Score+ cs_cdf (0.5-0.65)")
-    p.add_argument("--all-landcover", action="store_true",
-                   help="pantau NDVI semua tutupan lahan, bukan hanya hutan alam (titik api selalu semua lahan)")
+    p.add_argument("--forest-only", action="store_true",
+                   help="pantau NDVI hanya di hutan alam (bawaan: semua lahan, untuk karhutla)")
     p.add_argument("--cache-dir", default=str(HERE / "pantau_cache"))
     p.add_argument("--out", type=Path, default=HERE / "output_pantau")
     p.add_argument("--quiet", action="store_true")
@@ -65,12 +65,11 @@ def make_env(args, region) -> SentinelEnvironment:
     return SentinelEnvironment(
         region, project=args.project, end_date=args.end_date, n_periods=args.periods,
         period_days=args.period_days, latency_days=args.latency, pixel_m=args.pixel, cache_dir=args.cache_dir,
-        forest_only=not args.all_landcover, cloud_threshold=args.cloud_threshold,
+        forest_only=args.forest_only, cloud_threshold=args.cloud_threshold,
     )
 
 
 def build_model(args, env) -> ForestMonitoringModel:
-    first_monitored = 3  # langkah 1-2 = periode acuan
     return ForestMonitoringModel(
         env=env,
         reference_lags=(2, 1),  # acuan = dua periode sebelumnya
@@ -90,7 +89,8 @@ def build_model(args, env) -> ForestMonitoringModel:
             "fire_lookback": 2,  # sejak pengamatan acuan: bila periode lalu berawan, acuan mundur 2 periode
             "fire_buffer_px": math.ceil(375 / args.pixel),  # toleransi lokasi titik api VIIRS 375 m
         },
-        hotspot_kwargs={"start_day": first_monitored},
+        hotspot_kwargs={"start_day": 1},  # semua periode; riwayat mencegah laporan ganda antar-putaran
+        logging_requires_forest=True,  # karhutla di semua lahan, tebang liar hanya di hutan alam
         incident_kwargs={"merge_px": max(1, math.ceil(args.merge_m / args.pixel))},
     )
 
@@ -148,11 +148,13 @@ def run_kecamatan(args, region, env=None) -> dict:
 
     cover = env.landcover_summary()
     if cover:
-        mode = "hanya hutan alam yang dipantau NDVI-nya" if env.forest_only else "semua tutupan lahan dipantau"
+        mode = ("NDVI hanya dipantau di hutan alam" if env.forest_only
+                else "kebakaran dipantau di semua lahan; tebang liar hanya di hutan alam")
         print("Tutupan lahan: " + ", ".join(f"{k} {v:,.0f} ha" for k, v in cover.items()) + f" ({mode})")
 
     model = build_model(args, env)
-    print(f"\n{'periode':26s}{'hutan alam bebas awan':>23s}{'titik api':>16s}")
+    scope = "hutan alam bebas awan" if env.forest_only else "lahan bebas awan"
+    print(f"\n{'periode':26s}{scope:>23s}{'titik api':>16s}")
     for day in range(1, env.n_periods + 1):
         model.step()
         cov = env.coverage(day)
@@ -187,8 +189,10 @@ def run_kecamatan(args, region, env=None) -> dict:
     pending = [c for c in cases if c.status == PENDING]
     n = lambda s: sum(c.status == s for c in cases)  # noqa: E731
     incidents = model.incident_agent.incidents if model.incident_agent else []
-    print(f"\nAgen Deteksi: {len(cases)} wilayah curiga di hutan alam -> terkonfirmasi {n(CONFIRMED)}, "
-          f"ditolak {n(DISMISSED)}, perlu tinjauan {n(UNCERTAIN)}, menunggu {len(pending)}")
+    landuse = sum(c.cause == "perubahan lahan" for c in cases)
+    print(f"\nAgen Deteksi: {len(cases)} wilayah curiga -> terkonfirmasi {n(CONFIRMED)}, "
+          f"ditolak {n(DISMISSED)} (termasuk {landuse} perubahan kebun/ladang tanpa api), "
+          f"perlu tinjauan {n(UNCERTAIN)}, menunggu {len(pending)}")
     print(f"Agen Pengelompokan: {n(CONFIRMED)} kasus terkonfirmasi -> {len(incidents)} kejadian")
     if model.hotspot_agent:
         print(f"Agen Titik Api: {len(model.hotspot_agent.clusters)} klaster titik api")
@@ -205,7 +209,10 @@ def run_kecamatan(args, region, env=None) -> dict:
         ev = e["evidence"]
         extra = f"{ev.get('members', 1)} bagian" + (f", {len(ev['hotspots'])} klaster titik api"
                                                      if ev.get("hotspots") else "")
-        print(f"  {e['priority']:7s} {KIND_LABEL.get(e['kind'], e['kind']):11s} ({e['lat']:.4f}, {e['lon']:.4f}) "
+        label = KIND_LABEL.get(e["kind"], e["kind"])
+        if e["kind"] == "fire" and ev.get("landcover"):
+            label = "kebakaran hutan" if ev["landcover"] == "hutan" else f"kebakaran {ev['landcover']}"
+        print(f"  {e['priority']:7s} {label:22s} ({e['lat']:.4f}, {e['lon']:.4f}) "
               f"{e['area_ha']:7.1f} ha  periode {e['scene_period']} ({extra}) -> {e['channel']}")
     if pending:
         biggest = sorted(pending, key=lambda c: -c.area_px)[:5]

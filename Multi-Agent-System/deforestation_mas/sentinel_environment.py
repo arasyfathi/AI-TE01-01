@@ -9,8 +9,8 @@ Satu langkah Mesa = satu periode. Data yang diambil:
   landcover : peta statis 1 = hutan alam, 2 = kebun sawit, 3 = lahan lain.
               Hutan alam = hutan menurut JRC GFC2020 V4 (definisinya mengecualikan perkebunan
               komoditas termasuk sawit) dan bukan sawit menurut BIOPAMA Global Oil Palm v1.2.
-              Bila ``forest_only``, NDVI hanya dipantau di hutan alam: pembukaan/peremajaan kebun
-              sawit bukan deforestasi.
+              Bawaan: NDVI dipantau di semua lahan (karhutla); model memastikan "tebang liar" hanya di
+              hutan alam. Bila ``forest_only``, NDVI hanya dipantau di hutan alam.
   hotspots  : titik api VIIRS per sel ~375 m (jumlah deteksi, hari pertama/terakhir, FRP maks.) untuk
               Agen Titik Api. Jendela langkah terakhir diperpanjang sampai hari ini (peringatan dini).
 
@@ -76,7 +76,7 @@ class SentinelEnvironment:
         latency_days: int = 3,
         pixel_m: float = 30.0,
         cache_dir: str | Path | None = "pantau_cache",
-        forest_only: bool = True,
+        forest_only: bool = False,
         cloud_threshold: float = 0.6,
         fire_collections: tuple[str, ...] = VIIRS_FIRE,
         tile_px: int = 1024,

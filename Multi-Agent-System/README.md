@@ -242,7 +242,7 @@ NASA mengumumkan Terra dan Aqua (pembawa MODIS) mulai dimatikan pada akhir 2026/
 | :--- | :--- | :--- |
 | NDVI 30 m (bawaan) | `COPERNICUS/S2_SR_HARMONIZED` | komposit median periode; piksel berawan dibuang dengan Cloud Score+ (`GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED`, `cs_cdf` ≥ 0,6) |
 | Hutan alam | `JRC/GFC2020/V4` (2020) | hutan menurut definisi EUDR, yang mengecualikan perkebunan komoditas termasuk sawit |
-| Kebun sawit | `BIOPAMA/GlobalOilPalm/v1_2` (2016–2021) | sawit industri dan sawit rakyat; dikeluarkan dari pemantauan NDVI |
+| Kebun sawit | `BIOPAMA/GlobalOilPalm/v1_2` (2016–2021) | sawit industri dan sawit rakyat; dipakai untuk label tutupan lahan dan aturan karhutla |
 | Titik api harian | koleksi VIIRS yang sama | jumlah deteksi, tanggal pertama/terakhir, FRP per sel ~375 m untuk Agen Titik Api |
 | Titik api | `NASA/LANCE/SNPP_VIIRS/C2` + `NASA/LANCE/NOAA20_VIIRS/C2` | ada titik api berkeyakinan nominal/tinggi dalam periode = bukti kebakaran |
 
@@ -251,11 +251,17 @@ NASA mengumumkan Terra dan Aqua (pembawa MODIS) mulai dimatikan pada akhir 2026/
   acuan dan 2 periode yang dipantau. Satu langkah Mesa = satu periode.
 - Acuan = **pengamatan bersih terakhir** per piksel (periode sebelumnya; bila berawan, mundur satu periode),
   sehingga kehilangan yang sudah dilaporkan tidak terdeteksi ulang pada putaran berikutnya.
-- **NDVI hanya dipantau di hutan alam.** Uji pertama di Rasau Jaya memakai masker ESA WorldCover; saat dibuka di
-  Google Earth, kebanyakan peringatan ternyata berada di kebun sawit, karena kelas "tutupan pohon" WorldCover
-  juga mencakup sawit. Pembukaan/peremajaan sawit bukan deforestasi, jadi kini dikeluarkan.
-- **Agen Titik Api** memberi peringatan dini dari titik api VIIRS di seluruh lahan, termasuk kebun sawit,
-  sampai hari ini (bukan hanya sampai periode lengkap terakhir).
+- **Cakupan karhutla (kebakaran hutan dan lahan).** NDVI dipantau di **semua lahan**, tetapi:
+  - **kebakaran** (penurunan NDVI + bukti api) diperingatkan di hutan alam (DARURAT), kebun sawit (SIAGA),
+    dan lahan lain (WASPADA);
+  - **tebang liar** hanya di **hutan alam**. Penurunan NDVI tanpa api di kebun sawit/ladang adalah panen atau
+    peremajaan, jadi ditolak dan tidak diperingatkan.
+  Latar belakang: uji pertama di Rasau Jaya memakai masker ESA WorldCover, dan saat dibuka di Google Earth
+  kebanyakan "tebang liar" ternyata berada di kebun sawit (kelas "tutupan pohon" WorldCover juga mencakup
+  sawit). Pada uji berikutnya, hutan alam di Rasau Jaya hanya ±200 ha dari ±21.700 ha, jadi membatasi
+  pemantauan ke hutan alam membuat kebakaran lahan tidak terlihat. Opsi `--forest-only` tetap tersedia.
+- **Agen Titik Api** memberi peringatan dini dari titik api VIIRS di seluruh lahan untuk keempat periode dan
+  sampai hari ini (bukan hanya sampai periode lengkap terakhir); riwayat mencegah laporan ganda.
 - **Kebakaran dikonfirmasi pada periode yang sama** (penurunan NDVI + titik api VIIRS di lokasi itu), lalu
   **Agen Pengelompokan Kejadian** menyatukan fragmen yang berdekatan menjadi satu kejadian.
 - **Tebang liar dikonfirmasi** bila periode berikutnya membuktikan kehilangan menetap; bila NDVI pulih

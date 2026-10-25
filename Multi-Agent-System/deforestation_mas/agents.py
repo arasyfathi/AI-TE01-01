@@ -35,6 +35,23 @@ from .messaging import CANCEL, CONFIRM, INFORM, PROPOSE, REQUEST, Message
 PENDING, CONFIRMED, DISMISSED, UNCERTAIN = "pending", "confirmed", "dismissed", "uncertain"
 
 
+LAND_CODES = ((1, "hutan"), (2, "sawit"), (3, "lahan lain"))
+
+
+def land_of(env, mask: np.ndarray):
+    """Tutupan lahan dominan di bawah ``mask`` (label, porsi per kelas), bila lingkungan menyediakannya."""
+    getter = getattr(env, "landcover", None)
+    lc = getter() if getter else None
+    if lc is None:
+        return None, None
+    vals = lc[mask]
+    vals = vals[np.isfinite(vals)]
+    if vals.size == 0:
+        return None, None
+    shares = {name: round(float(np.mean(vals == code)), 2) for code, name in LAND_CODES}
+    return max(shares, key=shares.get), shares
+
+
 def reference_window(day: int, lags: tuple[int, int] = (9, 5)) -> range:
     """Langkah-langkah acuan dari ``day - lags[0]`` sampai ``day - lags[1]``.
     Bawaan (9, 5): hari 'minggu lalu', H-9 sampai H-5. Untuk siklus 2 minggu, (2, 1): dua periode sebelumnya."""
@@ -62,6 +79,7 @@ class Case:
     round: int = 0
     last_check_day: int = 0
     decided_day: int | None = None
+    land: str | None = None  # tutupan lahan dominan (hutan / sawit / lahan lain), bila diketahui
 
     @property
     def area_px(self) -> int:
@@ -282,6 +300,9 @@ class ChangeDetectionAgent(MonitorAgent):
             centroid=self.model.env.to_latlon(r, c),
             last_check_day=day,
         )
+        case.land, shares = land_of(self.model.env, region)
+        if shares:
+            case.evidence["tutupan_lahan"] = shares
         self.model.cases[case.case_id] = case
 
         if not self.model.use_validation:
@@ -342,6 +363,13 @@ class ChangeDetectionAgent(MonitorAgent):
         if self.fire_fast_track and case.val_vote and case.cause == "fire" and case.val_strong:
             case.evidence["jalur_cepat"] = "penurunan NDVI dan bukti api di lokasi yang sama"
             self._confirm(case)
+            return
+        if self.model.logging_requires_forest and case.land not in (None, "hutan"):
+            # Karhutla: di kebun/ladang hanya kebakaran yang relevan. Penurunan NDVI tanpa bukti api di sana
+            # adalah panen/peremajaan, bukan tebang liar (deforestasi hanya berlaku di hutan alam).
+            case.evidence["catatan"] = f"perubahan NDVI di {case.land} tanpa bukti api (bukan karhutla/deforestasi)"
+            self.send(CANCEL, case.validator, "consensus", {"case_id": case.case_id}, case.case_id)
+            self._finalize(case, DISMISSED, cause="perubahan lahan")
             return
         if case.det_vote is None:
             return
@@ -654,11 +682,17 @@ class NotificationAgent(MonitorAgent):
         self._new_alert(c["cluster_id"], "hotspot", priority, channel, c["day"], c["lat"], c["lon"],
                         c["area_ha"], 0.9, evidence, anchor=c["anchor"])
 
+    @staticmethod
+    def _incident_channel(c: dict):
+        if c["kind"] == "fire" and c.get("landcover") in HOTSPOT_CHANNELS:
+            return HOTSPOT_CHANNELS[c["landcover"]]  # kebakaran hutan DARURAT, sawit SIAGA, lahan lain WASPADA
+        return CHANNELS.get(c["kind"], CHANNELS["unknown"])
+
     def _alert_incident(self, c: dict):
-        evidence = {k: c[k] for k in ("members", "member_ids", "hotspots", "causes")}
+        evidence = {k: c.get(k) for k in ("members", "member_ids", "hotspots", "causes", "landcover", "land_shares")}
         alert = self.by_case.get(c["incident_id"])
         if alert is None:
-            priority, channel = CHANNELS.get(c["kind"], CHANNELS["unknown"])
+            priority, channel = self._incident_channel(c)
             self._new_alert(c["incident_id"], c["kind"], priority, channel, c["scene_day"], c["lat"], c["lon"],
                             c["area_ha"], c["confidence"], evidence, anchor=c["anchor"])
             return
@@ -666,7 +700,7 @@ class NotificationAgent(MonitorAgent):
         if c["kind"] != alert.kind:
             change.update(from_kind=alert.kind, to_kind=c["kind"])
             alert.kind = c["kind"]
-            alert.priority, alert.channel = CHANNELS.get(c["kind"], CHANNELS["unknown"])
+            alert.priority, alert.channel = self._incident_channel(c)
         alert.area_ha = c["area_ha"]
         alert.lat, alert.lon = round(c["lat"], 5), round(c["lon"], 5)
         alert.evidence = evidence
@@ -864,6 +898,7 @@ class IncidentAgent(MonitorAgent):
             "members": len(inc.members), "member_ids": list(inc.members), "hotspots": list(inc.hotspots),
             "causes": {c: causes.count(c) for c in set(causes)},
         }
+        content["landcover"], content["land_shares"] = land_of(env, inc.mask)
         topic = "incident_update" if inc.reported else "incident"
         inc.reported = True
         self.send(INFORM, self.model.notifier.name, topic, content, inc.incident_id)

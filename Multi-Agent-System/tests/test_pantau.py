@@ -329,7 +329,8 @@ def test_burn_scar_after_cloudy_period_is_fire_not_logging(tmp_path, capsys):
     world = absolute([("fire_late", 1, 40, 60, 40, 60), ("cloud", 2, 0, 999, 0, 999)], probe)
     run_pantau.run_kecamatan(args_for(tmp_path), region, FakeSentinel(region, world))
     hist = json.loads((tmp_path / region.slug / "riwayat_peringatan.json").read_text())
-    assert [h["kind"] for h in hist] == ["fire"] and hist[0]["scene_day"] == 3
+    fires = [h for h in hist if h["kind"] == "fire"]
+    assert {h["kind"] for h in hist} == {"hotspot", "fire"} and len(fires) == 1 and fires[0]["scene_day"] == 3
 
     # kontrol: dengan jangkauan titik api hanya 1 periode, bekas terbakar salah dicap tebang liar
     orig = run_pantau.build_model
@@ -338,6 +339,7 @@ def test_burn_scar_after_cloudy_period_is_fire_not_logging(tmp_path, capsys):
         model = orig(args, env)
         for v in model.validators:
             v.fire_lookback = 1
+        model.hotspot_agent.start_day = 3  # tanpa klaster titik api periode 1 untuk Agen Pengelompokan
         return model
 
     run_pantau.build_model = short_lookback
@@ -370,38 +372,37 @@ def test_cli_status(monkeypatch, capsys):
 
 
 # ------------------------------------------- tutupan lahan, titik api, pengelompokan kejadian
-def test_palm_clearing_not_alerted_but_palm_fire_is(tmp_path, capsys):
-    """Temuan uji Google Earth: banyak 'peringatan' ternyata di kebun sawit. Pembukaan/peremajaan sawit
-    bukan deforestasi (NDVI sawit tidak dipantau), tetapi kebakaran di sawit tetap diperingatkan (SIAGA)."""
+def test_karhutla_scope_fire_on_any_land_logging_only_in_forest(tmp_path, capsys):
+    """Karhutla: kebakaran dipantau di semua lahan (prioritas menurut tutupan lahan), sedangkan penurunan
+    NDVI tanpa api di kebun sawit (panen/peremajaan) bukan tebang liar dan tidak diperingatkan."""
     region = square_region()
     probe = SentinelEnvironment(region, cache_dir=None, end_date=END)
     world = absolute([
-        ("palm", 0, 0, 50, 0, 50), ("other", 0, 50, 104, 0, 40),
-        ("logging", 3, 10, 30, 10, 30),        # pembukaan di dalam kebun sawit
-        ("hotspot", 3, 20, 26, 20, 26),        # titik api di kebun sawit
+        ("palm", 0, 0, 60, 0, 104), ("other", 0, 60, 104, 0, 40),   # sisanya hutan alam
+        ("logging", 3, 5, 20, 70, 90),         # peremajaan kebun sawit tanpa api
+        ("fire", 3, 35, 45, 10, 20),           # kebakaran di kebun sawit
         ("hotspot", 4, 80, 86, 10, 16),        # titik api di lahan lain
-        ("logging", 3, 70, 82, 70, 82),        # pembukaan hutan alam sungguhan
+        ("logging", 3, 70, 82, 70, 82),        # pembukaan hutan alam
     ], probe)
     result = run_pantau.run_kecamatan(args_for(tmp_path), region, FakeSentinel(region, world))
-    capsys.readouterr()
+    out = capsys.readouterr().out
     hist = json.loads((tmp_path / region.slug / "riwayat_peringatan.json").read_text())
-    by_kind = {}
-    for h in hist:
-        by_kind.setdefault(h["kind"], []).append(h)
-    assert len(by_kind["logging"]) == 1 and by_kind["logging"][0]["lon"] > 109.5  # hanya hutan alam
-    assert "fire" not in by_kind  # kebun sawit tidak dipantau NDVI-nya, jadi tidak ada "kejadian" di sana
-    hotspot_cover = {h["evidence"]["landcover"]: h["priority"] for h in by_kind["hotspot"]}
+    events = {h["kind"]: h for h in hist if h["kind"] != "hotspot"}
+    assert set(events) == {"fire", "logging"}
+    assert events["fire"]["evidence"]["landcover"] == "sawit" and events["fire"]["priority"] == "SIAGA"
+    assert events["logging"]["evidence"]["causes"] == {"logging": 1} and events["logging"]["lon"] > 109.5
+    hotspot_cover = {h["evidence"]["landcover"]: h["priority"] for h in hist if h["kind"] == "hotspot"}
     assert hotspot_cover == {"sawit": "SIAGA", "lahan lain": "WASPADA"}
+    assert "1 perubahan kebun/ladang tanpa api" in out and "kebakaran sawit" in out
     assert result["ok"]
 
-    # kontrol: tanpa masker hutan alam (perilaku lama), perubahan di kebun sawit ikut menjadi kejadian
-    out = tmp_path / "kontrol"
-    args = run_pantau.parse_args(["--out", str(out), "--quiet", "--end-date", END, "--all-landcover"])
-    env = FakeSentinel(region, world, forest_only=False)
-    run_pantau.run_kecamatan(args, region, env)
+    # dengan --forest-only, kebakaran di kebun sawit tidak terlihat NDVI-nya (hanya titik api yang tersisa)
+    out_dir = tmp_path / "hutan_saja"
+    args = run_pantau.parse_args(["--out", str(out_dir), "--quiet", "--end-date", END, "--forest-only"])
+    run_pantau.run_kecamatan(args, region, FakeSentinel(region, world, forest_only=True))
     capsys.readouterr()
-    hist2 = json.loads((out / region.slug / "riwayat_peringatan.json").read_text())
-    assert sum(h["kind"] in ("logging", "fire") for h in hist2) == 2
+    hist2 = json.loads((out_dir / region.slug / "riwayat_peringatan.json").read_text())
+    assert [h["kind"] for h in hist2 if h["kind"] != "hotspot"] == ["logging"]
 
 
 def test_incident_agent_merges_fragments_and_links_hotspots():

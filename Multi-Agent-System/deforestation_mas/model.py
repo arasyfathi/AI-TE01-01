@@ -42,6 +42,7 @@ class ForestMonitoringModel(mesa.Model):
         reference_mode: str = "median",
         hotspot_kwargs: dict | None = None,
         incident_kwargs: dict | None = None,
+        logging_requires_forest: bool = False,
     ):
         """``env``: lingkungan data apa pun yang memenuhi antarmuka ``ForestEnvironment``
         (misalnya ``GEEEnvironment``). Bila kosong, dipakai lingkungan sintetis.
@@ -51,6 +52,8 @@ class ForestMonitoringModel(mesa.Model):
         piksel; dipakai pada siklus 2 minggu agar kehilangan lama tidak terdeteksi ulang).
         ``hotspot_kwargs`` / ``incident_kwargs``: bila diberikan (dict, boleh kosong), Agen Titik Api /
         Agen Pengelompokan Kejadian ikut dijalankan.
+        ``logging_requires_forest``: "tebang liar" hanya di hutan alam; di kebun/ladang hanya kebakaran yang
+        diperingatkan (karhutla). Butuh lingkungan yang menyediakan ``landcover()``.
         ``resolve_after_validation``: detektor membaca vonis validator pada langkah yang sama
         (penting bila satu langkah = 2 minggu, agar kebakaran tidak tertunda satu periode)."""
         super().__init__(rng=seed)
@@ -61,6 +64,7 @@ class ForestMonitoringModel(mesa.Model):
             raise ValueError("reference_mode harus 'median' atau 'latest'")
         self.reference_mode = reference_mode
         self.resolve_after_validation = resolve_after_validation
+        self.logging_requires_forest = logging_requires_forest
         self.bus = MessageBus()
         self.archive: dict = {}  # citra yang sudah diunduh ("data lake")
         self.cases: dict = {}  # semua kasus (registry bersama)
