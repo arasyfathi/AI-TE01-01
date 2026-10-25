@@ -53,6 +53,7 @@ class FakeSentinel(SentinelEnvironment):
         self.world = events
         self.calls = []
         self.hotspot_calls = []
+        self.landcover_calls = 0
 
     @staticmethod
     def start_of(period: int) -> dt.date:
@@ -82,6 +83,7 @@ class FakeSentinel(SentinelEnvironment):
         return decode_planes(np.where(np.isnan(raw), NODATA, raw), ("ndvi", "fire"), self.shape)
 
     def _request_landcover(self, progress=None):
+        self.landcover_calls += 1
         lc = np.full(self.shape, 1.0)  # bawaan: semua hutan alam
         for kind, _, r0, r1, c0, c1 in self.world:
             if kind in ("palm", "other"):
@@ -186,37 +188,34 @@ def test_fortnightly_run_end_to_end(tmp_path, capsys):
     env = FakeSentinel(region, world)
     result = run_pantau.run_kecamatan(args, region, env)
     out = capsys.readouterr().out
-    assert result["ok"] and result["hotspots"] == 1 and result["events"] == 2
+    # titik api + bekas terbakar; tebangan dan kabut (NDVI turun tanpa api) tidak diperingatkan
+    assert result["ok"] and result["hotspots"] == 1 and result["events"] == 1 and result["pending"] == 0
+    assert "ditolak 2 (termasuk 2 tanpa bukti api)" in out
 
     hist = json.loads((tmp_path / region.slug / "riwayat_peringatan.json").read_text())
     kinds = {h["kind"]: h for h in hist}
-    assert set(kinds) == {"hotspot", "fire", "logging"}
-    # peringatan dini titik api di hutan alam: DARURAT, pada periode kejadian
-    assert kinds["hotspot"]["priority"] == "DARURAT" and kinds["hotspot"]["evidence"]["landcover"] == "hutan"
-    # kebakaran dikonfirmasi pada periode yang sama (bukan menunggu 2 minggu) dan tertaut ke klaster titik api
-    assert kinds["fire"]["scene_day"] == kinds["fire"]["alert_day"] == 3
-    assert kinds["fire"]["evidence"]["hotspots"]
-    # tebang liar dikonfirmasi setelah periode berikutnya membuktikan kehilangan menetap
-    assert kinds["logging"]["scene_day"] == 3 and kinds["logging"]["alert_day"] == 4
-    assert result["pending"] == 1  # kabut di periode terakhir: belum bisa diputuskan, diperiksa putaran berikut
+    assert set(kinds) == {"hotspot", "fire"}
+    assert kinds["hotspot"]["priority"] == "DARURAT"  # api aktif
+    assert kinds["fire"]["priority"] == "TINGGI"  # bekas terbakar: penilaian area terbakar
+    # bekas terbakar dikonfirmasi pada periode yang sama dan tertaut ke klaster titik api
+    assert kinds["fire"]["scene_day"] == kinds["fire"]["alert_day"] == 3 and kinds["fire"]["evidence"]["hotspots"]
     gj = json.loads((tmp_path / region.slug / "peringatan.geojson").read_text())
-    assert len(gj["features"]) == 3 and gj["features"][0]["geometry"]["type"] == "Point"
+    assert len(gj["features"]) == 2 and gj["features"][0]["geometry"]["type"] == "Point"
     assert list((tmp_path / region.slug).glob("laporan_*.json")) and list((tmp_path / region.slug).glob("peta_*.png"))
+    assert env.landcover_calls == 0  # lahan tidak dibedakan: peta tutupan lahan tidak diunduh
 
     # Putaran yang sama diulang: tidak ada peringatan ganda
     run_pantau.run_kecamatan(args, region, FakeSentinel(region, world))
     out = capsys.readouterr().out
     assert "TITIK API (baru): 0" in out and "TERKONFIRMASI (baru): 0" in out
 
-    # Putaran 2 minggu kemudian: kejadian lama sudah jadi acuan, tidak terdeteksi ulang;
-    # kabut yang kemarin "menunggu" kini terbukti hilang -> ditolak.
+    # Putaran 2 minggu kemudian: kejadian lama sudah jadi acuan, tidak terdeteksi/dilaporkan ulang
     end2 = (dt.date.fromisoformat(END) + dt.timedelta(days=14)).isoformat()
     args2 = run_pantau.parse_args(["--out", str(tmp_path), "--quiet", "--end-date", end2])
     r2 = run_pantau.run_kecamatan(args2, region, FakeSentinel(region, world, end_date=end2))
-    out2 = capsys.readouterr().out
+    capsys.readouterr()
     hist2 = json.loads((tmp_path / region.slug / "riwayat_peringatan.json").read_text())
-    assert len(hist2) == 3 and r2["new"] == 0 and r2["pending"] == 0
-    assert "ditolak 1" in out2
+    assert len(hist2) == 2 and r2["new"] == 0 and r2["pending"] == 0
 
 
 def test_cloud_only_world_gives_no_cases(tmp_path, capsys):
@@ -246,7 +245,7 @@ def test_cache_reused_between_runs(tmp_path):
     first = FakeSentinel(region, [], cache_dir=tmp_path / "c")
     first.prefetch(hotspots_from=3)
     assert len(first.calls) == 4 and len(first.hotspot_calls) == 2
-    assert len(list((tmp_path / "c").rglob("*.npz"))) == 4 + 1 + 2  # periode, tutupan lahan, titik api
+    assert len(list((tmp_path / "c").rglob("*.npz"))) == 4 + 2  # periode dan titik api
     second = FakeSentinel(region, [], cache_dir=tmp_path / "c")
     second.prefetch(hotspots_from=3)
     assert second.calls == [] and second.hotspot_calls == []
@@ -372,37 +371,28 @@ def test_cli_status(monkeypatch, capsys):
 
 
 # ------------------------------------------- tutupan lahan, titik api, pengelompokan kejadian
-def test_karhutla_scope_fire_on_any_land_logging_only_in_forest(tmp_path, capsys):
-    """Karhutla: kebakaran dipantau di semua lahan (prioritas menurut tutupan lahan), sedangkan penurunan
-    NDVI tanpa api di kebun sawit (panen/peremajaan) bukan tebang liar dan tidak diperingatkan."""
+def test_fires_on_any_land_same_priority_and_no_logging_alerts(tmp_path, capsys):
+    """Fokus kebakaran tanpa membedakan lahan: kebakaran di kebun sawit, lahan lain, dan hutan diperlakukan
+    sama; penurunan NDVI tanpa api (di mana pun) tidak diperingatkan."""
     region = square_region()
     probe = SentinelEnvironment(region, cache_dir=None, end_date=END)
     world = absolute([
-        ("palm", 0, 0, 60, 0, 104), ("other", 0, 60, 104, 0, 40),   # sisanya hutan alam
-        ("logging", 3, 5, 20, 70, 90),         # peremajaan kebun sawit tanpa api
-        ("fire", 3, 35, 45, 10, 20),           # kebakaran di kebun sawit
-        ("hotspot", 4, 80, 86, 10, 16),        # titik api di lahan lain
-        ("logging", 3, 70, 82, 70, 82),        # pembukaan hutan alam
+        ("palm", 0, 0, 60, 0, 104), ("other", 0, 60, 104, 0, 40),   # tidak dipakai: lahan tidak dibedakan
+        ("logging", 3, 5, 20, 70, 90),         # penurunan NDVI tanpa api
+        ("fire", 3, 35, 45, 10, 20),           # kebakaran (di "sawit")
+        ("fire", 4, 85, 95, 5, 15),            # kebakaran (di "lahan lain")
+        ("logging", 3, 70, 82, 70, 82),        # penurunan NDVI tanpa api (di "hutan")
     ], probe)
-    result = run_pantau.run_kecamatan(args_for(tmp_path), region, FakeSentinel(region, world))
+    env = FakeSentinel(region, world)
+    result = run_pantau.run_kecamatan(args_for(tmp_path), region, env)
     out = capsys.readouterr().out
     hist = json.loads((tmp_path / region.slug / "riwayat_peringatan.json").read_text())
-    events = {h["kind"]: h for h in hist if h["kind"] != "hotspot"}
-    assert set(events) == {"fire", "logging"}
-    assert events["fire"]["evidence"]["landcover"] == "sawit" and events["fire"]["priority"] == "SIAGA"
-    assert events["logging"]["evidence"]["causes"] == {"logging": 1} and events["logging"]["lon"] > 109.5
-    hotspot_cover = {h["evidence"]["landcover"]: h["priority"] for h in hist if h["kind"] == "hotspot"}
-    assert hotspot_cover == {"sawit": "SIAGA", "lahan lain": "WASPADA"}
-    assert "1 perubahan kebun/ladang tanpa api" in out and "kebakaran sawit" in out
-    assert result["ok"]
-
-    # dengan --forest-only, kebakaran di kebun sawit tidak terlihat NDVI-nya (hanya titik api yang tersisa)
-    out_dir = tmp_path / "hutan_saja"
-    args = run_pantau.parse_args(["--out", str(out_dir), "--quiet", "--end-date", END, "--forest-only"])
-    run_pantau.run_kecamatan(args, region, FakeSentinel(region, world, forest_only=True))
-    capsys.readouterr()
-    hist2 = json.loads((out_dir / region.slug / "riwayat_peringatan.json").read_text())
-    assert [h["kind"] for h in hist2 if h["kind"] != "hotspot"] == ["logging"]
+    assert result["events"] == 2 and result["hotspots"] == 2
+    assert {h["kind"] for h in hist} == {"hotspot", "fire"}
+    assert {h["priority"] for h in hist if h["kind"] == "fire"} == {"TINGGI"}
+    assert {h["priority"] for h in hist if h["kind"] == "hotspot"} == {"DARURAT"}
+    assert all(h["evidence"].get("landcover") is None for h in hist)
+    assert "tebang liar" not in out and "sawit" not in out and env.landcover_calls == 0
 
 
 def test_incident_agent_merges_fragments_and_links_hotspots():
@@ -468,7 +458,7 @@ def test_hotspot_in_running_period_is_early_warning_and_not_duplicated(tmp_path,
 
 
 def test_landcover_and_hotspot_images_use_verified_datasets():
-    env = SentinelEnvironment(square_region(), cache_dir=None, end_date=END, retries=1)
+    env = SentinelEnvironment(square_region(), cache_dir=None, end_date=END, retries=1, use_landcover=True)
     ee = _stub_ee()
     env._ee = ee
     lc = env.landcover()

@@ -1,4 +1,9 @@
-"""Pemantauan deforestasi & kebakaran per kecamatan, siklus 2 minggu (Sentinel-2 + titik api VIIRS).
+"""Pemantauan kebakaran hutan dan lahan (karhutla) per kecamatan, siklus 2 minggu (Sentinel-2 + titik api VIIRS).
+
+Dua jenis peringatan, tanpa membedakan tutupan lahan:
+  * titik api aktif (Agen Titik Api, VIIRS sampai hari ini)       -> DARURAT
+  * bekas terbakar terkonfirmasi (penurunan NDVI + bukti api)     -> TINGGI
+Penurunan NDVI tanpa bukti api (panen, pembukaan lahan, kabut) tidak diperingatkan.
 
 Contoh:
     python run_pantau.py --list                                   # daftar kecamatan
@@ -50,8 +55,6 @@ def parse_args(argv=None):
     p.add_argument("--drop-threshold", type=float, default=0.20)
     p.add_argument("--persist-threshold", type=float, default=0.15)
     p.add_argument("--cloud-threshold", type=float, default=0.60, help="ambang Cloud Score+ cs_cdf (0.5-0.65)")
-    p.add_argument("--forest-only", action="store_true",
-                   help="pantau NDVI hanya di hutan alam (bawaan: semua lahan, untuk karhutla)")
     p.add_argument("--cache-dir", default=str(HERE / "pantau_cache"))
     p.add_argument("--out", type=Path, default=HERE / "output_pantau")
     p.add_argument("--quiet", action="store_true")
@@ -65,7 +68,7 @@ def make_env(args, region) -> SentinelEnvironment:
     return SentinelEnvironment(
         region, project=args.project, end_date=args.end_date, n_periods=args.periods,
         period_days=args.period_days, latency_days=args.latency, pixel_m=args.pixel, cache_dir=args.cache_dir,
-        forest_only=args.forest_only, cloud_threshold=args.cloud_threshold,
+        cloud_threshold=args.cloud_threshold,  # tanpa peta tutupan lahan: lahan tidak dibedakan
     )
 
 
@@ -90,7 +93,7 @@ def build_model(args, env) -> ForestMonitoringModel:
             "fire_buffer_px": math.ceil(375 / args.pixel),  # toleransi lokasi titik api VIIRS 375 m
         },
         hotspot_kwargs={"start_day": 1},  # semua periode; riwayat mencegah laporan ganda antar-putaran
-        logging_requires_forest=True,  # karhutla di semua lahan, tebang liar hanya di hutan alam
+        fire_only=True,  # hanya kebakaran yang diperingatkan
         incident_kwargs={"merge_px": max(1, math.ceil(args.merge_m / args.pixel))},
     )
 
@@ -120,13 +123,13 @@ def history_geojson(history: list[dict]) -> dict:
     for h in history:
         props = {k: v for k, v in h.items() if k not in ("evidence", "updates")}
         props.update({k: v for k, v in h.get("evidence", {}).items()
-                      if k in ("first_date", "last_date", "detections", "landcover", "members")})
+                      if k in ("first_date", "last_date", "detections", "members")})
         features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [h["lon"], h["lat"]]},
                          "properties": props})
     return {"type": "FeatureCollection", "features": features}
 
 
-KIND_LABEL = {"hotspot": "titik api", "fire": "kebakaran", "logging": "tebang liar", "uncertain": "perlu tinjauan"}
+KIND_LABEL = {"hotspot": "titik api", "fire": "bekas terbakar", "logging": "tebang liar", "uncertain": "perlu tinjauan"}
 
 
 # ------------------------------------------------------------- satu kecamatan
@@ -146,15 +149,9 @@ def run_kecamatan(args, region, env=None) -> dict:
         print(f"GAGAL mengambil data: {env.errors[-1] if env.errors else 'tidak diketahui'}")
         return {"region": region.name, "ok": False}
 
-    cover = env.landcover_summary()
-    if cover:
-        mode = ("NDVI hanya dipantau di hutan alam" if env.forest_only
-                else "kebakaran dipantau di semua lahan; tebang liar hanya di hutan alam")
-        print("Tutupan lahan: " + ", ".join(f"{k} {v:,.0f} ha" for k, v in cover.items()) + f" ({mode})")
 
     model = build_model(args, env)
-    scope = "hutan alam bebas awan" if env.forest_only else "lahan bebas awan"
-    print(f"\n{'periode':26s}{scope:>23s}{'titik api':>16s}")
+    print(f"\n{'periode':26s}{'lahan bebas awan':>23s}{'titik api':>16s}")
     for day in range(1, env.n_periods + 1):
         model.step()
         cov = env.coverage(day)
@@ -189,11 +186,11 @@ def run_kecamatan(args, region, env=None) -> dict:
     pending = [c for c in cases if c.status == PENDING]
     n = lambda s: sum(c.status == s for c in cases)  # noqa: E731
     incidents = model.incident_agent.incidents if model.incident_agent else []
-    landuse = sum(c.cause == "perubahan lahan" for c in cases)
-    print(f"\nAgen Deteksi: {len(cases)} wilayah curiga -> terkonfirmasi {n(CONFIRMED)}, "
-          f"ditolak {n(DISMISSED)} (termasuk {landuse} perubahan kebun/ladang tanpa api), "
+    no_fire = sum(c.cause == "bukan kebakaran" for c in cases)
+    print(f"\nAgen Deteksi: {len(cases)} wilayah NDVI turun -> bekas terbakar {n(CONFIRMED)}, "
+          f"ditolak {n(DISMISSED)} (termasuk {no_fire} tanpa bukti api), "
           f"perlu tinjauan {n(UNCERTAIN)}, menunggu {len(pending)}")
-    print(f"Agen Pengelompokan: {n(CONFIRMED)} kasus terkonfirmasi -> {len(incidents)} kejadian")
+    print(f"Agen Pengelompokan: {n(CONFIRMED)} bagian bekas terbakar -> {len(incidents)} kejadian kebakaran")
     if model.hotspot_agent:
         print(f"Agen Titik Api: {len(model.hotspot_agent.clusters)} klaster titik api")
 
@@ -202,17 +199,15 @@ def run_kecamatan(args, region, env=None) -> dict:
     print(f"\nPERINGATAN DINI TITIK API (baru): {len(hotspots)}" + ("" if hotspots else " (tidak ada)"))
     for e in sorted(hotspots, key=lambda e: e["evidence"]["first_date"]):
         ev = e["evidence"]
-        print(f"  {e['priority']:7s} {ev['landcover']:10s} ({e['lat']:.4f}, {e['lon']:.4f}) "
-              f"{ev['first_date']} s.d. {ev['last_date']}, {ev['detections']} deteksi -> {e['channel']}")
-    print(f"\nKEJADIAN TERKONFIRMASI (baru): {len(events)}" + ("" if events else " (tidak ada)"))
+        print(f"  {e['priority']:7s} ({e['lat']:.4f}, {e['lon']:.4f}) {ev['first_date']} s.d. {ev['last_date']}, "
+              f"{ev['detections']:4d} deteksi, ~{e['area_ha']:,.0f} ha -> {e['channel']}")
+    print(f"\nBEKAS TERBAKAR TERKONFIRMASI (baru): {len(events)}" + ("" if events else " (tidak ada)"))
     for e in sorted(events, key=lambda e: -e["area_ha"]):
         ev = e["evidence"]
         extra = f"{ev.get('members', 1)} bagian" + (f", {len(ev['hotspots'])} klaster titik api"
                                                      if ev.get("hotspots") else "")
         label = KIND_LABEL.get(e["kind"], e["kind"])
-        if e["kind"] == "fire" and ev.get("landcover"):
-            label = "kebakaran hutan" if ev["landcover"] == "hutan" else f"kebakaran {ev['landcover']}"
-        print(f"  {e['priority']:7s} {label:22s} ({e['lat']:.4f}, {e['lon']:.4f}) "
+        print(f"  {e['priority']:7s} {label:14s} ({e['lat']:.4f}, {e['lon']:.4f}) "
               f"{e['area_ha']:7.1f} ha  periode {e['scene_period']} ({extra}) -> {e['channel']}")
     if pending:
         biggest = sorted(pending, key=lambda c: -c.area_px)[:5]
@@ -227,7 +222,6 @@ def run_kecamatan(args, region, env=None) -> dict:
     report = {
         "kecamatan": region.name, "run_date": run_date, "titik_api_sampai": env.now.isoformat(),
         "periode": [env.label_of(d) for d in range(1, env.n_periods + 1)],
-        "tutupan_lahan_ha": cover,
         "peringatan_baru": new_alerts,
         "menunggu": [{"periode": env.label_of(c.day), "lat": c.centroid[0], "lon": c.centroid[1],
                       "area_ha": round(c.area_px * env.ha_per_px, 2), "bukti": c.evidence} for c in pending],
@@ -246,49 +240,40 @@ def plot(model, env, path: Path):
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.colors import ListedColormap
 
     last = max(model.archive) if model.archive else None
     if last is None:
         return
+    ref = model.detectors[0].reference_composite(last)
     fig, axes = plt.subplots(1, 2, figsize=(15, 7 * env.shape[0] / max(env.shape[1], 1) + 1.2))
-    lc = env.landcover()
-    ax = axes[0]
-    ax.set_facecolor("white")
-    if lc is not None:
-        ax.imshow(lc, cmap=ListedColormap(["#1b7837", "#e6ab02", "#d9d9d9"]), vmin=0.5, vmax=3.5,
-                  interpolation="nearest")
-    ax.set_title("Tutupan lahan: hijau = hutan alam, kuning = sawit, abu-abu = lahan lain", fontsize=9)
-    ax = axes[1]
-    ax.set_facecolor("#dddddd")
-    ax.imshow(model.archive[last].ndvi, cmap="YlGn", vmin=0, vmax=1, interpolation="nearest")
-    ax.set_title(f"NDVI hutan alam {env.label_of(last)} + peringatan", fontsize=9)
-    for a in axes:
-        a.contour(env.region_mask.astype(float), levels=[0.5], colors="black", linewidths=0.6)
-        a.set_xticks([]), a.set_yticks([])
+    for ax, img, title in ((axes[0], ref, "NDVI acuan (pengamatan bersih sebelumnya)"),
+                           (axes[1], model.archive[last].ndvi, f"NDVI {env.label_of(last)}")):
+        ax.set_facecolor("#dddddd")
+        if img is not None:
+            ax.imshow(img, cmap="YlGn", vmin=0, vmax=1, interpolation="nearest")
+        ax.contour(env.region_mask.astype(float), levels=[0.5], colors="black", linewidths=0.6)
+        ax.set_title(title, fontsize=9)
+        ax.set_xticks([]), ax.set_yticks([])
 
     k = env.hs_block
     if model.hotspot_agent:
-        colors = {"hutan": "red", "sawit": "darkorange", "lahan lain": "purple"}
         for cl in model.hotspot_agent.clusters:
             rr, cc = zip(*cl["cells"])
             for a in axes:
                 a.scatter([(c + 0.5) * k for c in cc], [(r + 0.5) * k for r in rr], marker="^", s=18,
-                          color=colors[cl["landcover"]], linewidths=0)
-    style = {"fire": ("*", "red"), "logging": ("s", "saddlebrown")}
+                          color="red", linewidths=0)
     for inc in (model.incident_agent.incidents if model.incident_agent else []):
-        rr, cc = np.nonzero(inc.mask)
-        mk, col = style.get(inc.kind, ("x", "black"))
-        size = 80 + 4 * np.sqrt(inc.mask.sum())
-        axes[1].scatter(cc.mean(), rr.mean(), marker=mk, s=size, facecolors="none", edgecolors=col, linewidths=1.6)
+        if inc.kind != "fire":
+            continue
+        axes[1].contour(inc.mask.astype(float), levels=[0.5], colors="darkred", linewidths=1.0)
     for c in model.cases.values():
         if c.status == PENDING:
             rr, cc = np.nonzero(c.mask)
             axes[1].scatter(cc.mean(), rr.mean(), marker="o", s=60, facecolors="none", edgecolors="orange",
                             linewidths=1.2)
-    fig.suptitle(f"Kecamatan {env.region.name}. Segitiga = titik api VIIRS (merah: hutan, oranye: sawit, "
-                 "ungu: lahan lain); bintang = kebakaran, kotak = tebang liar (ukuran ~ luas); "
-                 "lingkaran oranye = curiga, menunggu", fontsize=8)
+    fig.suptitle(f"Kecamatan {env.region.name}. Segitiga merah = titik api VIIRS; garis merah tua = bekas "
+                 "terbakar terkonfirmasi; lingkaran oranye = menunggu periode berikutnya; abu-abu = awan",
+                 fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)

@@ -43,6 +43,7 @@ class ForestMonitoringModel(mesa.Model):
         hotspot_kwargs: dict | None = None,
         incident_kwargs: dict | None = None,
         logging_requires_forest: bool = False,
+        fire_only: bool = False,
     ):
         """``env``: lingkungan data apa pun yang memenuhi antarmuka ``ForestEnvironment``
         (misalnya ``GEEEnvironment``). Bila kosong, dipakai lingkungan sintetis.
@@ -54,6 +55,7 @@ class ForestMonitoringModel(mesa.Model):
         Agen Pengelompokan Kejadian ikut dijalankan.
         ``logging_requires_forest``: "tebang liar" hanya di hutan alam; di kebun/ladang hanya kebakaran yang
         diperingatkan (karhutla). Butuh lingkungan yang menyediakan ``landcover()``.
+        ``fire_only``: fokus kebakaran; kasus tanpa bukti api ditolak, tidak ada peringatan tebang liar.
         ``resolve_after_validation``: detektor membaca vonis validator pada langkah yang sama
         (penting bila satu langkah = 2 minggu, agar kebakaran tidak tertunda satu periode)."""
         super().__init__(rng=seed)
@@ -65,6 +67,7 @@ class ForestMonitoringModel(mesa.Model):
         self.reference_mode = reference_mode
         self.resolve_after_validation = resolve_after_validation
         self.logging_requires_forest = logging_requires_forest
+        self.fire_only = fire_only
         self.bus = MessageBus()
         self.archive: dict = {}  # citra yang sudah diunduh ("data lake")
         self.cases: dict = {}  # semua kasus (registry bersama)

@@ -364,6 +364,12 @@ class ChangeDetectionAgent(MonitorAgent):
             case.evidence["jalur_cepat"] = "penurunan NDVI dan bukti api di lokasi yang sama"
             self._confirm(case)
             return
+        if self.model.fire_only and not (case.val_vote and case.cause == "fire"):
+            # Fokus kebakaran: penurunan NDVI tanpa bukti api bukan kebakaran -> ditolak tanpa menunggu.
+            case.evidence["catatan"] = "penurunan NDVI tanpa bukti api (bukan kebakaran)"
+            self.send(CANCEL, case.validator, "consensus", {"case_id": case.case_id}, case.case_id)
+            self._finalize(case, DISMISSED, cause="bukan kebakaran")
+            return
         if self.model.logging_requires_forest and case.land not in (None, "hutan"):
             # Karhutla: di kebun/ladang hanya kebakaran yang relevan. Penurunan NDVI tanpa bukti api di sana
             # adalah panen/peremajaan, bukan tebang liar (deforestasi hanya berlaku di hutan alam).
@@ -676,7 +682,7 @@ class NotificationAgent(MonitorAgent):
         return alert
 
     def _alert_hotspot(self, c: dict):
-        priority, channel = HOTSPOT_CHANNELS[c["landcover"]]
+        priority, channel = HOTSPOT_CHANNELS.get(c["landcover"], ACTIVE_FIRE)
         evidence = {k: c[k] for k in ("first_date", "last_date", "detections", "frp_max", "landcover",
                                       "forest_share", "palm_share", "window")}
         self._new_alert(c["cluster_id"], "hotspot", priority, channel, c["day"], c["lat"], c["lon"],
@@ -684,8 +690,10 @@ class NotificationAgent(MonitorAgent):
 
     @staticmethod
     def _incident_channel(c: dict):
-        if c["kind"] == "fire" and c.get("landcover") in HOTSPOT_CHANNELS:
-            return HOTSPOT_CHANNELS[c["landcover"]]  # kebakaran hutan DARURAT, sawit SIAGA, lahan lain WASPADA
+        if c["kind"] == "fire":
+            if c.get("landcover") in HOTSPOT_CHANNELS:
+                return HOTSPOT_CHANNELS[c["landcover"]]  # bila tutupan lahan dipakai
+            return BURNED_AREA
         return CHANNELS.get(c["kind"], CHANNELS["unknown"])
 
     def _alert_incident(self, c: dict):
@@ -706,6 +714,10 @@ class NotificationAgent(MonitorAgent):
         alert.evidence = evidence
         alert.updates.append(change)
 
+
+# Tanpa pembedaan lahan: prioritas menurut jenis peringatan.
+ACTIVE_FIRE = ("DARURAT", "Satgas Karhutla / BPBD")  # titik api aktif: perlu pemadaman
+BURNED_AREA = ("TINGGI", "Satgas Karhutla / BPBD (penilaian area terbakar)")  # bekas terbakar terkonfirmasi
 
 HOTSPOT_CHANNELS = {
     "hutan": ("DARURAT", "Tim Pemadam Kebakaran Hutan"),
@@ -737,10 +749,9 @@ class HotspotAgent(MonitorAgent):
         if day < self.start_day or not hasattr(env, "fetch_hotspots"):
             return
         hs = env.fetch_hotspots(day)
-        cover = env.hotspot_landcover()
-        if hs is None or cover is None:
+        if hs is None:
             return
-        forest, palm = cover
+        cover = env.hotspot_landcover()  # None bila tutupan lahan tidak dipakai
         start, end = env.hotspot_window(day)
         labels, n = ndimage.label(hs["count"] > 0, structure=EIGHT)
         for lab in range(1, n + 1):
@@ -749,8 +760,11 @@ class HotspotAgent(MonitorAgent):
             first = hs["first"][rr, cc]
             first = np.where(np.isfinite(first), first, np.inf)
             i = int(np.lexsort((cc, rr, first))[0])  # sel paling awal menyala: jangkar yang tetap
-            f_share, p_share = float(forest[cells].mean()), float(palm[cells].mean())
-            landcover = "hutan" if f_share >= self.share else "sawit" if p_share >= self.share else "lahan lain"
+            if cover is not None:
+                f_share, p_share = float(cover[0][cells].mean()), float(cover[1][cells].mean())
+                landcover = "hutan" if f_share >= self.share else "sawit" if p_share >= self.share else "lahan lain"
+            else:
+                f_share = p_share = landcover = None
             lat, lon = env.hs_to_latlon(rr.mean(), cc.mean())
             first_day = float(np.nanmin(hs["first"][cells])) if np.isfinite(hs["first"][cells]).any() else 0.0
             last_day = float(np.nanmax(hs["last"][cells])) if np.isfinite(hs["last"][cells]).any() else first_day
@@ -764,8 +778,8 @@ class HotspotAgent(MonitorAgent):
                 "detections": int(hs["count"][cells].sum()),
                 "frp_max": round(float(np.nanmax(frp)), 1) if np.isfinite(frp).any() else None,
                 "landcover": landcover,
-                "forest_share": round(f_share, 2),
-                "palm_share": round(p_share, 2),
+                "forest_share": None if f_share is None else round(f_share, 2),
+                "palm_share": None if p_share is None else round(p_share, 2),
                 "lat": lat, "lon": lon,
                 "anchor": env.hs_to_latlon(rr[i], cc[i]),
                 "area_ha": float(cells.sum() * env.hs_block ** 2 * env.ha_per_px),

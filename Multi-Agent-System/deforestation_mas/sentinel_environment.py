@@ -77,6 +77,7 @@ class SentinelEnvironment:
         pixel_m: float = 30.0,
         cache_dir: str | Path | None = "pantau_cache",
         forest_only: bool = False,
+        use_landcover: bool = False,
         cloud_threshold: float = 0.6,
         fire_collections: tuple[str, ...] = VIIRS_FIRE,
         tile_px: int = 1024,
@@ -91,6 +92,7 @@ class SentinelEnvironment:
         self.pixel_m = pixel_m
         self.cache_dir = Path(cache_dir) if cache_dir else None
         self.forest_only = forest_only
+        self.use_landcover = use_landcover or forest_only  # tanpa ini peta tutupan lahan tidak diunduh
         self.cloud_threshold = cloud_threshold
         self.fire_collections = tuple(fire_collections)
         self.tile_px = tile_px
@@ -362,7 +364,10 @@ class SentinelEnvironment:
         return data
 
     def landcover(self, progress=None) -> np.ndarray | None:
-        """Peta tutupan lahan (1 hutan alam, 2 sawit, 3 lahan lain; NaN di luar wilayah)."""
+        """Peta tutupan lahan (1 hutan alam, 2 sawit, 3 lahan lain; NaN di luar wilayah).
+        None bila ``use_landcover`` dimatikan."""
+        if not self.use_landcover:
+            return None
         if self._landcover is None:
             data = self._cached("landcover", f"tutupan_lahan_{self.pixel_m:g}m.npz",
                                 lambda: self._request_landcover(progress))
@@ -387,8 +392,8 @@ class SentinelEnvironment:
             return self._mem[day]
         if not 1 <= day <= self.n_periods:
             return None
-        lc = self.landcover(progress)
-        if lc is None:
+        lc = self.landcover(progress) if self.forest_only else None
+        if self.forest_only and lc is None:
             return None
         name = f"{self.date_of(day)}_{self.period_days}h_{self.pixel_m:g}m_cs{self.cloud_threshold:g}.npz"
         data = self._cached(("period", day), name, lambda: self._request_period(day, progress))
