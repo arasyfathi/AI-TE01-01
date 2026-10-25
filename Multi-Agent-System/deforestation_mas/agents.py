@@ -419,10 +419,11 @@ class Alert:
     alert_day: int
     lat: float
     lon: float
-    area_ha: float
+    initial_area_ha: float  # luas saat peringatan pertama dikirim
+    area_ha: float  # luas terkini (bertambah bila kebakaran meluas)
     confidence: float
     evidence: dict
-    updates: list = field(default_factory=list)
+    updates: list = field(default_factory=list)  # riwayat perluasan: {day, from_ha, to_ha}
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -447,10 +448,17 @@ class NotificationAgent(MonitorAgent):
                 self._alert(case, msg.content["status"])
             elif msg.topic == "update" and case.case_id in self.by_case:
                 alert = self.by_case[case.case_id]
-                alert.area_ha = case.area_px * self.ha_per_px
-                alert.updates.append({"day": self.model.day, "area_ha": alert.area_ha})
+                new_area = case.area_px * self.ha_per_px
+                if new_area <= alert.area_ha:
+                    continue  # luas sudah tercatat (laporan & perluasan tiba di hari yang sama)
+                alert.updates.append({"day": self.model.day, "from_ha": alert.area_ha, "to_ha": new_area})
+                alert.area_ha = new_area
                 if self.verbose:
-                    print(f"  [hari {self.model.day:3d}] UPDATE {alert.alert_id}: area meluas -> {alert.area_ha:.0f} ha")
+                    u = alert.updates[-1]
+                    print(
+                        f"  [hari {self.model.day:3d}] UPDATE  {alert.alert_id}: area meluas "
+                        f"{u['from_ha']:.0f} -> {u['to_ha']:.0f} ha"
+                    )
 
     def _alert(self, case: Case, status: str):
         kind = "uncertain" if status == UNCERTAIN else (case.cause or "unknown")
@@ -465,6 +473,7 @@ class NotificationAgent(MonitorAgent):
             alert_day=self.model.day,
             lat=round(case.centroid[0], 5),
             lon=round(case.centroid[1], 5),
+            initial_area_ha=case.area_px * self.ha_per_px,
             area_ha=case.area_px * self.ha_per_px,
             confidence=case.val_confidence,
             evidence=case.evidence,

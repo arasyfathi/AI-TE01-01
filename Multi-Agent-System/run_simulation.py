@@ -82,7 +82,8 @@ def plot(model, path: Path):
         ax.scatter(col, r, marker=mk, s=70, facecolors="none" if mk != "x" else colr, edgecolors=colr)
     ax.set_title(f"NDVI hari {model.day}: kontur = kejadian nyata, simbol = peringatan")
     ax.legend(handles=[Patch(color="saddlebrown", label="tebang liar"), Patch(color="red", label="kebakaran"),
-                       Patch(color="royalblue", label="perlu tinjauan")], loc="lower right", fontsize=8)
+                       Patch(color="royalblue", label="perlu tinjauan")],
+              loc="upper center", bbox_to_anchor=(0.5, -0.01), ncol=3, fontsize=8, frameon=False)
     ax.set_xticks([]), ax.set_yticks([])
 
     ax = axes[1]
@@ -101,7 +102,7 @@ def plot(model, path: Path):
     ax.set_title("Lalu lintas komunikasi MAS per hari")
 
     fig.tight_layout()
-    fig.savefig(path, dpi=130)
+    fig.savefig(path, dpi=130, bbox_inches="tight")
     plt.close(fig)
 
 
