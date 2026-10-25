@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/Kode%20Kelas-AI--TE01-orange.svg?style=flat-square" alt="Class">
   <img src="https://img.shields.io/badge/Program%20Studi-S1%20Teknik%20Elektro-red.svg?style=flat-square" alt="Major">
   <img src="https://img.shields.io/badge/Bahasa-C%2B%2B%20%7C%20Python-blue.svg?style=flat-square" alt="Languages">
+  <img src="https://img.shields.io/badge/Framework-Mesa%20(MAS)-purple.svg?style=flat-square" alt="Mesa">
   <img src="https://img.shields.io/badge/Lisensi-Apache%202.0-green.svg?style=flat-square" alt="License">
 </p>
 
@@ -59,11 +60,12 @@
 
 ## 📖 Latar Belakang & Ringkasan Proyek
 
-Kecerdasan Buatan (*Artificial Intelligence*) berakar pada dua pilar fundamental pemecahan masalah:
+Kecerdasan Buatan (*Artificial Intelligence*) berakar pada tiga pilar pemecahan masalah:
 1. **State-Space Search (Pencarian Ruang Keadaan)**: Bagaimana suatu agen cerdas menemukan urutan aksi atau jalur terbaik dari titik awal (*Initial State*) menuju kondisi tujuan (*Goal State*).
 2. **Knowledge-Based Reasoning (Penalaran Berbasis Pengetahuan)**: Bagaimana sistem dapat merepresentasikan kepakaran manusia dalam bentuk aturan logis formal untuk mengambil keputusan inferensial yang akurat layaknya seorang ahli.
+3. **Multi-Agent System (Sistem Multi-Agen)**: Bagaimana beberapa agen otonom, masing-masing dengan pandangan terbatas, saling bertukar pesan dan mencapai konsensus untuk menyelesaikan masalah yang tidak bisa dipecahkan satu agen saja.
 
-Repositori ini menyatukan kedua konsep fundamental tersebut dalam bentuk kode yang siap dieksekusi, terstruktur rapi, dan terdokumentasi secara mendalam.
+Repositori ini menyatukan ketiga konsep tersebut dalam bentuk kode yang siap dieksekusi, terstruktur rapi, dan terdokumentasi secara mendalam.
 
 ---
 
