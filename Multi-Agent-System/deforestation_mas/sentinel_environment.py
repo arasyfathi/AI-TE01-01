@@ -1,16 +1,20 @@
 """Lingkungan pemantauan per periode (bawaan 2 minggu) untuk satu wilayah, dari Google Earth Engine.
 
-Satu langkah Mesa = satu periode. Untuk setiap periode diambil:
+Satu langkah Mesa = satu periode. Data yang diambil:
 
-  ndvi : komposit median NDVI Sentinel-2 (COPERNICUS/S2_SR_HARMONIZED), piksel berawan dibuang
-         memakai Cloud Score+ (GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED, cs_cdf >= ambang).
-         Bila ``forest_only``, hanya hutan dan mangrove menurut ESA WorldCover 2021 (kelas 10 dan 95)
-         yang dipantau, agar panen sawah/kebun tidak menjadi alarm palsu.
-  fire : 1 = ada titik api VIIRS (keyakinan nominal/tinggi) dalam periode itu, 0 = tidak ada,
-         NaN = tidak ada data titik api sama sekali untuk periode itu.
+  ndvi      : komposit median NDVI Sentinel-2 per periode (COPERNICUS/S2_SR_HARMONIZED); piksel berawan
+              dibuang memakai Cloud Score+ (GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED, cs_cdf >= ambang).
+  fire      : 1 = ada titik api VIIRS (keyakinan nominal/tinggi) dalam periode itu, 0 = tidak ada,
+              NaN = tidak ada data titik api untuk periode itu. Dipakai Agen Validasi.
+  landcover : peta statis 1 = hutan alam, 2 = kebun sawit, 3 = lahan lain.
+              Hutan alam = hutan menurut JRC GFC2020 V4 (definisinya mengecualikan perkebunan
+              komoditas termasuk sawit) dan bukan sawit menurut BIOPAMA Global Oil Palm v1.2.
+              Bila ``forest_only``, NDVI hanya dipantau di hutan alam: pembukaan/peremajaan kebun
+              sawit bukan deforestasi.
+  hotspots  : titik api VIIRS per sel ~375 m (jumlah deteksi, hari pertama/terakhir, FRP maks.) untuk
+              Agen Titik Api. Jendela langkah terakhir diperpanjang sampai hari ini (peringatan dini).
 
-Piksel di luar poligon wilayah diberi NaN. Suhu permukaan tidak dipakai (selalu NaN); bukti kebakaran
-berasal dari titik api VIIRS.
+Piksel di luar poligon wilayah diberi NaN. Suhu permukaan tidak dipakai (selalu NaN).
 
 Periode memakai kalender tetap: periode ke-i = [EPOCH + 14*i, EPOCH + 14*(i+1)), sehingga cache dan
 riwayat peringatan konsisten antar-putaran. Periode terakhir = periode lengkap terakhir sebelum
@@ -31,13 +35,17 @@ from .region import Region
 
 NODATA = -9999.0
 BANDS = ("ndvi", "fire")
+HOTSPOT_BANDS = ("count", "first", "last", "frp")
 S2 = "COPERNICUS/S2_SR_HARMONIZED"
 CLOUD_SCORE = "GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED"
-WORLDCOVER = "ESA/WorldCover/v200"
-FOREST_CLASSES = (10, 95)  # tutupan pohon, mangrove
+JRC_FOREST = "JRC/GFC2020/V4"
+OIL_PALM = "BIOPAMA/GlobalOilPalm/v1_2"
 VIIRS_FIRE = ("NASA/LANCE/SNPP_VIIRS/C2", "NASA/LANCE/NOAA20_VIIRS/C2")
+FOREST, PALM, OTHER = 1, 2, 3
+LANDCOVER_NAMES = {FOREST: "hutan", PALM: "sawit", OTHER: "lahan lain"}
 EPOCH = dt.date(2015, 6, 29)  # Senin, awal era Sentinel-2
 M_PER_DEG = 111_320.0
+VIIRS_M = 375.0
 
 
 def decode_planes(arr, names, shape) -> dict[str, np.ndarray]:
@@ -91,7 +99,9 @@ class SentinelEnvironment:
 
         if isinstance(end_date, str):
             end_date = dt.date.fromisoformat(end_date)
-        end = end_date or (today or dt.date.today()) - dt.timedelta(latency_days)
+        # "sekarang": batas akhir data titik api (peringatan dini). Uji historis: end_date + latensi.
+        self.now = today or ((end_date + dt.timedelta(latency_days)) if end_date else dt.date.today())
+        end = end_date or self.now - dt.timedelta(latency_days)
         self.end_date = end
         complete = (end - EPOCH).days // period_days  # jumlah periode yang sudah lengkap
         self.last_period = complete - 1
@@ -110,13 +120,21 @@ class SentinelEnvironment:
         lat_c = (lat_min + lat_max) / 2
         self.ha_per_px = pixel_m * pixel_m * math.cos(math.radians(lat_c)) / 10_000
 
+        # Grid titik api: blok k x k piksel utama (~375 m), pojok kiri-atas sama
+        self.hs_block = max(1, round(VIIRS_M / pixel_m))
+        self.hs_shape = (math.ceil(height / self.hs_block), math.ceil(width / self.hs_block))
+        self.hs_region = self._block_reduce(self.region_mask.astype(float), np.nanmax) > 0
+
         self.day = 0
         self.events: list = []
         self.cloud_log: list = []
         self.errors: list[str] = []
         self._ee = None
         self._mem: dict[int, dict[str, np.ndarray]] = {}
-        self._failures: dict[int, int] = {}
+        self._hs_mem: dict[tuple[str, str], dict[str, np.ndarray]] = {}
+        self._failures: dict = {}
+        self._landcover: np.ndarray | None = None
+        self._hs_landcover: tuple[np.ndarray, np.ndarray] | None = None
         self._nan = np.full(self.shape, np.nan, dtype=np.float32)
         self._nan.setflags(write=False)
 
@@ -136,6 +154,13 @@ class SentinelEnvironment:
         start, end = self.period_of(day)
         return f"{start.isoformat()} s.d. {(end - dt.timedelta(days=1)).isoformat()}"
 
+    def hotspot_window(self, day: int) -> tuple[dt.date, dt.date]:
+        """Jendela titik api untuk langkah ``day``; langkah terakhir diperpanjang sampai hari ini."""
+        start, end = self.period_of(day)
+        if day == self.n_periods:
+            end = max(end, self.now + dt.timedelta(days=1))
+        return start, end
+
     def advance_day(self) -> None:
         self.day += 1
 
@@ -144,6 +169,27 @@ class SentinelEnvironment:
             round(self.lat0 - (r + 0.5) * self.cell_deg, 5),
             round(self.lon0 + (c + 0.5) * self.cell_deg, 5),
         )
+
+    def hs_to_latlon(self, hr: float, hc: float) -> tuple[float, float]:
+        k = self.hs_block
+        return self.to_latlon((hr + 0.5) * k - 0.5, (hc + 0.5) * k - 0.5)
+
+    def hs_box(self, hr: int, hc: int) -> tuple[slice, slice]:
+        """Potongan grid utama yang ditutup satu sel titik api."""
+        k = self.hs_block
+        return slice(hr * k, (hr + 1) * k), slice(hc * k, (hc + 1) * k)
+
+    def _block_reduce(self, a: np.ndarray, func) -> np.ndarray:
+        k = self.hs_block
+        hh, ww = self.hs_shape
+        padded = np.full((hh * k, ww * k), np.nan)
+        padded[: a.shape[0], : a.shape[1]] = a
+        blocks = padded.reshape(hh, k, ww, k).swapaxes(1, 2).reshape(hh, ww, k * k)
+        import warnings
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return func(blocks, axis=2)
 
     # ---------------------------------------------------------- koneksi GEE
     def connect(self):
@@ -162,6 +208,12 @@ class SentinelEnvironment:
             [self.lon0, self.lat0 - h * self.cell_deg, self.lon0 + w * self.cell_deg, self.lat0], None, False
         )
 
+    def _fire_collection(self, ee, start, end):
+        fires = ee.ImageCollection(self.fire_collections[0])
+        for cid in self.fire_collections[1:]:
+            fires = fires.merge(ee.ImageCollection(cid))
+        return fires.filterDate(start, end)
+
     def _build_period_image(self, ee, start: str, end: str):
         geom = self._geometry(ee)
         empty = lambda name: ee.Image.constant(0).selfMask().rename(name)  # noqa: E731 - seluruhnya tertutup
@@ -177,20 +229,36 @@ class SentinelEnvironment:
             .map(ndvi_of)
         )
         ndvi = ee.Image(ee.Algorithms.If(s2.size().gt(0), s2.median(), empty("ndvi"))).rename("ndvi")
-        if self.forest_only:
-            cover = ee.ImageCollection(WORLDCOVER).first().select("Map")
-            forest = cover.eq(FOREST_CLASSES[0])
-            for cls in FOREST_CLASSES[1:]:
-                forest = forest.Or(cover.eq(cls))
-            ndvi = ndvi.updateMask(forest)
-
-        fires = ee.ImageCollection(self.fire_collections[0])
-        for cid in self.fire_collections[1:]:
-            fires = fires.merge(ee.ImageCollection(cid))
-        fires = fires.filterDate(start, end).map(lambda img: img.select("confidence").gte(1).rename("fire"))
+        fires = self._fire_collection(ee, start, end).map(
+            lambda img: img.select("confidence").gte(1).rename("fire")
+        )
         fire = ee.Image(ee.Algorithms.If(fires.size().gt(0), fires.max().unmask(0), empty("fire"))).rename("fire")
-
         return ndvi.addBands(fire).toFloat().unmask(NODATA)
+
+    def _build_landcover_image(self, ee):
+        forest = ee.Image(JRC_FOREST).select("Map").unmask(0).eq(1)
+        palm = ee.ImageCollection(OIL_PALM).select("classification").mosaic().unmask(0)
+        landcover = ee.Image.constant(OTHER).where(forest, FOREST).where(palm.gte(1), PALM)
+        return landcover.rename("landcover").toFloat().unmask(NODATA)
+
+    def _build_hotspot_image(self, ee, start: str, end: str):
+        start_d = ee.Date(start)
+
+        def per_image(img):
+            fire = img.select("confidence").gte(1)
+            day = ee.Image(img.date().difference(start_d, "day")).toFloat().updateMask(fire)
+            frp = img.select("frp").toFloat().updateMask(fire)
+            return (fire.updateMask(fire).toFloat().rename("count")
+                    .addBands(day.rename("first")).addBands(day.rename("last")).addBands(frp.rename("frp")))
+
+        col = self._fire_collection(ee, start, end).map(per_image)
+        stats = (col.select("count").sum().rename("count")
+                 .addBands(col.select("first").min().rename("first"))
+                 .addBands(col.select("last").max().rename("last"))
+                 .addBands(col.select("frp").max().rename("frp")))
+        empty = ee.Image.constant([0, 0, 0, 0]).selfMask().rename(list(HOTSPOT_BANDS))
+        image = ee.Image(ee.Algorithms.If(col.size().gt(0), stats, empty)).rename(list(HOTSPOT_BANDS))
+        return image.toFloat().unmask(NODATA)
 
     def _tiles(self):
         h, w = self.shape
@@ -198,15 +266,43 @@ class SentinelEnvironment:
             for tx in range(0, w, self.tile_px):
                 yield ty, tx, min(self.tile_px, h - ty), min(self.tile_px, w - tx)
 
-    def _tile_grid(self, ty, tx, th, tw) -> dict:
+    def _tile_grid(self, ty, tx, th, tw, cell=None) -> dict:
+        cell = cell or self.cell_deg
         return {
             "dimensions": {"width": tw, "height": th},
             "affineTransform": {
-                "scaleX": self.cell_deg, "shearX": 0, "translateX": self.lon0 + tx * self.cell_deg,
-                "shearY": 0, "scaleY": -self.cell_deg, "translateY": self.lat0 - ty * self.cell_deg,
+                "scaleX": cell, "shearX": 0, "translateX": self.lon0 + tx * cell,
+                "shearY": 0, "scaleY": -cell, "translateY": self.lat0 - ty * cell,
             },
             "crsCode": "EPSG:4326",
         }
+
+    def _compute(self, ee, request, names, shape):
+        last = None
+        for attempt in range(self.retries):
+            try:
+                return decode_planes(ee.data.computePixels(request), names, shape)
+            except Exception as exc:  # noqa: BLE001 - EEException, kuota, jaringan
+                last = exc
+                time.sleep(min(2 ** attempt, 8))
+        raise RuntimeError(f"{type(last).__name__}: {last}")
+
+    def _fetch_tiles(self, image, names, label, progress=None) -> dict[str, np.ndarray] | None:
+        ee = self.connect()
+        out = {b: np.full(self.shape, np.nan, dtype=np.float32) for b in names}
+        tiles = list(self._tiles())
+        for i, (ty, tx, th, tw) in enumerate(tiles, 1):
+            if progress:
+                progress(f"{label}: ubin {i}/{len(tiles)}")
+            request = {"expression": image, "fileFormat": "NUMPY_NDARRAY", "grid": self._tile_grid(ty, tx, th, tw)}
+            try:
+                planes = self._compute(ee, request, names, (th, tw))
+            except RuntimeError as exc:
+                self.errors.append(f"{label} ubin {i}: {exc}")
+                return None
+            for b in names:
+                out[b][ty:ty + th, tx:tx + tw] = planes[b]
+        return out
 
     def _request_period(self, day: int, progress=None) -> dict[str, np.ndarray] | None:
         """Ambil satu periode (per ubin, lalu disatukan). None bila gagal (alasannya di ``errors``)."""
@@ -217,60 +313,120 @@ class SentinelEnvironment:
         except Exception as exc:  # noqa: BLE001
             self.errors.append(f"{start}: {type(exc).__name__}: {exc}")
             return None
-        out = {b: np.full(self.shape, np.nan, dtype=np.float32) for b in BANDS}
-        tiles = list(self._tiles())
-        for i, (ty, tx, th, tw) in enumerate(tiles, 1):
-            if progress:
-                progress(f"periode {self.label_of(day)}: ubin {i}/{len(tiles)}")
-            request = {"expression": image, "fileFormat": "NUMPY_NDARRAY", "grid": self._tile_grid(ty, tx, th, tw)}
-            last = None
-            for attempt in range(self.retries):
-                try:
-                    planes = decode_planes(ee.data.computePixels(request), BANDS, (th, tw))
-                    break
-                except Exception as exc:  # noqa: BLE001 - EEException, kuota, jaringan
-                    last = exc
-                    time.sleep(min(2 ** attempt, 8))
-            else:
-                self.errors.append(f"{start} ubin {i}: {type(last).__name__}: {last}")
-                return None
-            for b in BANDS:
-                out[b][ty:ty + th, tx:tx + tw] = planes[b]
-        return out
+        return self._fetch_tiles(image, BANDS, f"periode {self.label_of(day)}", progress)
+
+    def _request_landcover(self, progress=None) -> dict[str, np.ndarray] | None:
+        ee = self.connect()
+        try:
+            image = self._build_landcover_image(ee)
+        except Exception as exc:  # noqa: BLE001
+            self.errors.append(f"tutupan lahan: {type(exc).__name__}: {exc}")
+            return None
+        return self._fetch_tiles(image, ("landcover",), "peta tutupan lahan", progress)
+
+    def _request_hotspots(self, start: str, end: str) -> dict[str, np.ndarray] | None:
+        ee = self.connect()
+        hh, ww = self.hs_shape
+        request = {
+            "expression": self._build_hotspot_image(ee, start, end),
+            "fileFormat": "NUMPY_NDARRAY",
+            "grid": self._tile_grid(0, 0, hh, ww, cell=self.cell_deg * self.hs_block),
+        }
+        try:
+            return self._compute(ee, request, HOTSPOT_BANDS, (hh, ww))
+        except Exception as exc:  # noqa: BLE001
+            self.errors.append(f"titik api {start}..{end}: {exc}")
+            return None
 
     # ------------------------------------------------------ cache & pemuatan
-    def _cache_path(self, day: int) -> Path | None:
+    def _cache_file(self, name: str) -> Path | None:
         if self.cache_dir is None:
             return None
-        start = self.date_of(day)
-        flags = f"{self.pixel_m:g}m_{'hutan' if self.forest_only else 'semua'}_cs{self.cloud_threshold:g}"
-        return self.cache_dir / self.region.slug / f"{start}_{self.period_days}h_{flags}.npz"
+        return self.cache_dir / self.region.slug / name
+
+    def _cached(self, key, name, request):
+        """Muat dari cache npz, atau minta ke GEE lalu simpan. Mencatat kegagalan per ``key``."""
+        if self._failures.get(key, 0) >= self.max_failures:
+            return None
+        path = self._cache_file(name)
+        if path is not None and path.exists():
+            with np.load(path) as z:
+                return {b: z[b] for b in z.files}
+        data = request()
+        if data is None:
+            self._failures[key] = self._failures.get(key, 0) + 1
+            return None
+        if path is not None:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            np.savez_compressed(path, **data)
+        return data
+
+    def landcover(self, progress=None) -> np.ndarray | None:
+        """Peta tutupan lahan (1 hutan alam, 2 sawit, 3 lahan lain; NaN di luar wilayah)."""
+        if self._landcover is None:
+            data = self._cached("landcover", f"tutupan_lahan_{self.pixel_m:g}m.npz",
+                                lambda: self._request_landcover(progress))
+            if data is None:
+                return None
+            self._landcover = np.where(self.region_mask, data["landcover"], np.nan).astype(np.float32)
+        return self._landcover
+
+    def hotspot_landcover(self) -> tuple[np.ndarray, np.ndarray] | None:
+        """Porsi hutan alam dan sawit di tiap sel titik api."""
+        if self._hs_landcover is None:
+            lc = self.landcover()
+            if lc is None:
+                return None
+            forest = self._block_reduce(np.where(np.isfinite(lc), (lc == FOREST).astype(float), np.nan), np.nanmean)
+            palm = self._block_reduce(np.where(np.isfinite(lc), (lc == PALM).astype(float), np.nan), np.nanmean)
+            self._hs_landcover = (np.nan_to_num(forest), np.nan_to_num(palm))
+        return self._hs_landcover
 
     def _load(self, day: int, progress=None) -> dict[str, np.ndarray] | None:
         if day in self._mem:
             return self._mem[day]
-        if not 1 <= day <= self.n_periods or self._failures.get(day, 0) >= self.max_failures:
+        if not 1 <= day <= self.n_periods:
             return None
-        path = self._cache_path(day)
-        if path is not None and path.exists():
-            with np.load(path) as z:
-                data = {b: z[b] for b in BANDS}
-        else:
-            data = self._request_period(day, progress)
-            if data is None:
-                self._failures[day] = self._failures.get(day, 0) + 1
-                return None
-            if path is not None:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                np.savez_compressed(path, **data)
+        lc = self.landcover(progress)
+        if lc is None:
+            return None
+        name = f"{self.date_of(day)}_{self.period_days}h_{self.pixel_m:g}m_cs{self.cloud_threshold:g}.npz"
+        data = self._cached(("period", day), name, lambda: self._request_period(day, progress))
+        if data is None:
+            return None
         outside = ~self.region_mask
-        data = {b: np.where(outside, np.nan, a).astype(np.float32) for b, a in data.items()}
+        ndvi = np.where(outside, np.nan, data["ndvi"])
+        if self.forest_only:
+            ndvi = np.where(lc == FOREST, ndvi, np.nan)  # kebun sawit & lahan lain tidak dipantau NDVI-nya
+        data = {"ndvi": ndvi.astype(np.float32), "fire": np.where(outside, np.nan, data["fire"]).astype(np.float32)}
         self._mem[day] = data
         return data
 
-    def prefetch(self, progress=None) -> list[tuple[int, bool]]:
-        """Unduh semua periode di jendela (dengan pesan kemajuan). Mengembalikan (langkah, berhasil)."""
-        return [(d, self._load(d, progress) is not None) for d in range(1, self.n_periods + 1)]
+    def fetch_hotspots(self, day: int, progress=None) -> dict[str, np.ndarray] | None:
+        """Titik api per sel ~375 m dalam jendela langkah ``day``: count, first/last (hari sejak awal
+        jendela), frp. Sel di luar wilayah diberi count 0."""
+        if not 1 <= day <= self.n_periods:
+            return None
+        start, end = (d.isoformat() for d in self.hotspot_window(day))
+        key = (start, end)
+        if key not in self._hs_mem:
+            if progress:
+                progress(f"titik api {start} s.d. {end}")
+            data = self._cached(("hotspot", key), f"titik_api_{start}_{end}_{self.hs_block}.npz",
+                                lambda: self._request_hotspots(start, end))
+            if data is None:
+                return None
+            count = np.nan_to_num(data["count"]) * self.hs_region
+            self._hs_mem[key] = {"count": count, "first": data["first"], "last": data["last"], "frp": data["frp"]}
+        return self._hs_mem[key]
+
+    def prefetch(self, progress=None, hotspots_from: int | None = None) -> list[tuple[int, bool]]:
+        """Unduh tutupan lahan, semua periode, dan (bila diminta) titik api mulai langkah ``hotspots_from``."""
+        results = [(d, self._load(d, progress) is not None) for d in range(1, self.n_periods + 1)]
+        if hotspots_from:
+            for d in range(hotspots_from, self.n_periods + 1):
+                self.fetch_hotspots(d, progress)
+        return results
 
     # --------------------------------------------------- antarmuka untuk agen
     def available_days(self) -> list[int]:
@@ -294,18 +450,27 @@ class SentinelEnvironment:
 
     # ------------------------------------------------------- ringkasan & status
     def coverage(self, day: int) -> dict:
-        """Ringkasan satu periode di dalam wilayah: luas hutan teramati bebas awan dan titik api."""
+        """Ringkasan satu periode di dalam wilayah: hutan alam teramati bebas awan dan titik api."""
         data = self._mem.get(day)
         if data is None:
             return {"ok": False}
         inside = self.region_mask
         fire = data["fire"][inside]
+        lc = self._landcover
+        forest_ha = float(np.sum(lc == FOREST) * self.ha_per_px) if lc is not None else float("nan")
         return {
             "ok": True,
             "clear_ha": float(np.isfinite(data["ndvi"][inside]).sum() * self.ha_per_px),
+            "forest_ha": forest_ha,
             "fire_data": bool(np.isfinite(fire).any()),
             "fire_px": int(np.nansum(fire > 0.5)),
         }
+
+    def landcover_summary(self) -> dict[str, float]:
+        lc = self._landcover
+        if lc is None:
+            return {}
+        return {name: float(np.sum(lc == code) * self.ha_per_px) for code, name in LANDCOVER_NAMES.items()}
 
     def status(self, lookback_days: int = 60, today: dt.date | None = None) -> dict[str, str | None]:
         """Tanggal citra terbaru tiap sumber data di atas wilayah ini (untuk memastikan data masih mengalir)."""

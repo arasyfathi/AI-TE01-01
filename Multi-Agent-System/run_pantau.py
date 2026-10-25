@@ -28,7 +28,6 @@ from deforestation_mas import ForestMonitoringModel
 from deforestation_mas.agents import CONFIRMED, DISMISSED, PENDING, UNCERTAIN
 from deforestation_mas.region import find_region, load_regions
 from deforestation_mas.sentinel_environment import CLOUD_SCORE, S2, SentinelEnvironment
-from run_gee import describe_case
 
 HERE = Path(__file__).resolve().parent
 DEFAULT_REGIONS = HERE / "data" / "kubu_raya_kecamatan.geojson"
@@ -47,10 +46,12 @@ def parse_args(argv=None):
     p.add_argument("--latency", type=int, default=3, help="jeda masuknya data ke GEE (hari)")
     p.add_argument("--pixel", type=float, default=30.0, help="ukuran piksel (m); 10 = paling tajam tetapi lambat")
     p.add_argument("--min-ha", type=float, default=2.0, help="luas minimal wilayah curiga (ha)")
+    p.add_argument("--merge-m", type=float, default=500.0, help="jarak penggabungan kasus menjadi satu kejadian (m)")
     p.add_argument("--drop-threshold", type=float, default=0.20)
     p.add_argument("--persist-threshold", type=float, default=0.15)
     p.add_argument("--cloud-threshold", type=float, default=0.60, help="ambang Cloud Score+ cs_cdf (0.5-0.65)")
-    p.add_argument("--all-landcover", action="store_true", help="pantau semua tutupan lahan, bukan hanya hutan")
+    p.add_argument("--all-landcover", action="store_true",
+                   help="pantau NDVI semua tutupan lahan, bukan hanya hutan alam (titik api selalu semua lahan)")
     p.add_argument("--cache-dir", default=str(HERE / "pantau_cache"))
     p.add_argument("--out", type=Path, default=HERE / "output_pantau")
     p.add_argument("--quiet", action="store_true")
@@ -69,6 +70,7 @@ def make_env(args, region) -> SentinelEnvironment:
 
 
 def build_model(args, env) -> ForestMonitoringModel:
+    first_monitored = 3  # langkah 1-2 = periode acuan
     return ForestMonitoringModel(
         env=env,
         reference_lags=(2, 1),  # acuan = dua periode sebelumnya
@@ -88,12 +90,18 @@ def build_model(args, env) -> ForestMonitoringModel:
             "fire_lookback": 2,  # sejak pengamatan acuan: bila periode lalu berawan, acuan mundur 2 periode
             "fire_buffer_px": math.ceil(375 / args.pixel),  # toleransi lokasi titik api VIIRS 375 m
         },
+        hotspot_kwargs={"start_day": first_monitored},
+        incident_kwargs={"merge_px": max(1, math.ceil(args.merge_m / args.pixel))},
     )
 
 
 # --------------------------------------------------------------- riwayat
 def alert_key(entry: dict) -> str:
-    return f"{entry['kind']}|{entry['scene_period']}|{entry['lat']:.3f}|{entry['lon']:.3f}"
+    """Kunci untuk mengenali peringatan yang sama antar-putaran: jenis, waktu, dan titik jangkar."""
+    lat = entry.get("anchor_lat") if entry.get("anchor_lat") is not None else entry["lat"]
+    lon = entry.get("anchor_lon") if entry.get("anchor_lon") is not None else entry["lon"]
+    when = entry["evidence"].get("first_date") if entry["kind"] == "hotspot" else entry["scene_period"]
+    return f"{entry['kind']}|{when}|{lat:.3f}|{lon:.3f}"
 
 
 def load_history(path: Path) -> list[dict]:
@@ -103,7 +111,7 @@ def load_history(path: Path) -> list[dict]:
 
 
 def save_history(path: Path, history: list[dict]) -> None:
-    path.write_text(json.dumps(history, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(history, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
 
 
 def history_geojson(history: list[dict]) -> dict:
@@ -111,9 +119,14 @@ def history_geojson(history: list[dict]) -> dict:
     features = []
     for h in history:
         props = {k: v for k, v in h.items() if k not in ("evidence", "updates")}
+        props.update({k: v for k, v in h.get("evidence", {}).items()
+                      if k in ("first_date", "last_date", "detections", "landcover", "members")})
         features.append({"type": "Feature", "geometry": {"type": "Point", "coordinates": [h["lon"], h["lat"]]},
                          "properties": props})
     return {"type": "FeatureCollection", "features": features}
+
+
+KIND_LABEL = {"hotspot": "titik api", "fire": "kebakaran", "logging": "tebang liar", "uncertain": "perlu tinjauan"}
 
 
 # ------------------------------------------------------------- satu kecamatan
@@ -121,19 +134,25 @@ def run_kecamatan(args, region, env=None) -> dict:
     env = env or make_env(args, region)
     print(f"\n=== Kecamatan {region.name} ({region.area_km2:,.0f} km2) ===")
     print(f"Periode dipantau: {env.label_of(1)} ... {env.label_of(env.n_periods)} "
-          f"(grid {env.shape[1]}x{env.shape[0]} piksel @ {env.pixel_m:g} m)")
+          f"(grid {env.shape[1]}x{env.shape[0]} piksel @ {env.pixel_m:g} m); "
+          f"titik api sampai {env.now.isoformat()}")
 
     def progress(msg):
         if not args.quiet:
             print(f"  mengunduh {msg}", flush=True)
 
-    results = env.prefetch(progress)
+    results = env.prefetch(progress, hotspots_from=3)
     if not any(ok for _, ok in results):
         print(f"GAGAL mengambil data: {env.errors[-1] if env.errors else 'tidak diketahui'}")
         return {"region": region.name, "ok": False}
 
+    cover = env.landcover_summary()
+    if cover:
+        mode = "hanya hutan alam yang dipantau NDVI-nya" if env.forest_only else "semua tutupan lahan dipantau"
+        print("Tutupan lahan: " + ", ".join(f"{k} {v:,.0f} ha" for k, v in cover.items()) + f" ({mode})")
+
     model = build_model(args, env)
-    print(f"\n{'periode':26s}{'hutan bebas awan':>18s}{'titik api':>18s}")
+    print(f"\n{'periode':26s}{'hutan alam bebas awan':>23s}{'titik api':>16s}")
     for day in range(1, env.n_periods + 1):
         model.step()
         cov = env.coverage(day)
@@ -142,7 +161,7 @@ def run_kecamatan(args, region, env=None) -> dict:
             continue
         fire = f"{cov['fire_px'] * env.ha_per_px:,.0f} ha" if cov["fire_data"] else "tak ada data"
         role = "  (acuan)" if day <= 2 else ""
-        print(f"{env.label_of(day):26s}{cov['clear_ha']:>15,.0f} ha{fire:>18s}{role}")
+        print(f"{env.label_of(day):26s}{cov['clear_ha']:>20,.0f} ha{fire:>16s}{role}")
 
     out_dir = args.out / region.slug
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -161,41 +180,47 @@ def run_kecamatan(args, region, env=None) -> dict:
             known.add(alert_key(entry))
     history.extend(new_alerts)
     save_history(hist_path, history)
-    (out_dir / "peringatan.geojson").write_text(json.dumps(history_geojson(history), ensure_ascii=False),
-                                                encoding="utf-8")
+    (out_dir / "peringatan.geojson").write_text(json.dumps(history_geojson(history), ensure_ascii=False,
+                                                           default=str), encoding="utf-8")
 
-    cases = sorted(model.cases.values(), key=lambda c: c.day)
+    cases = list(model.cases.values())
     pending = [c for c in cases if c.status == PENDING]
     n = lambda s: sum(c.status == s for c in cases)  # noqa: E731
-    print(f"\nKasus: {len(cases)} (terkonfirmasi {n(CONFIRMED)}, ditolak {n(DISMISSED)}, "
-          f"perlu tinjauan {n(UNCERTAIN)}, menunggu periode berikutnya {len(pending)})")
-    def line(c):
-        lat, lon = c.centroid
-        return (f"  {env.label_of(c.day):26s} {c.status:10s} {str(c.cause):14s} ({lat:.4f}, {lon:.4f}) "
-                f"{c.area_px * env.ha_per_px:7.1f} ha  {describe_case(c)}")
+    incidents = model.incident_agent.incidents if model.incident_agent else []
+    print(f"\nAgen Deteksi: {len(cases)} wilayah curiga di hutan alam -> terkonfirmasi {n(CONFIRMED)}, "
+          f"ditolak {n(DISMISSED)}, perlu tinjauan {n(UNCERTAIN)}, menunggu {len(pending)}")
+    print(f"Agen Pengelompokan: {n(CONFIRMED)} kasus terkonfirmasi -> {len(incidents)} kejadian")
+    if model.hotspot_agent:
+        print(f"Agen Titik Api: {len(model.hotspot_agent.clusters)} klaster titik api")
 
-    for c in cases:
-        if c.status != PENDING:
-            print(line(c))
+    hotspots = [e for e in new_alerts if e["kind"] == "hotspot"]
+    events = [e for e in new_alerts if e["kind"] != "hotspot"]
+    print(f"\nPERINGATAN DINI TITIK API (baru): {len(hotspots)}" + ("" if hotspots else " (tidak ada)"))
+    for e in sorted(hotspots, key=lambda e: e["evidence"]["first_date"]):
+        ev = e["evidence"]
+        print(f"  {e['priority']:7s} {ev['landcover']:10s} ({e['lat']:.4f}, {e['lon']:.4f}) "
+              f"{ev['first_date']} s.d. {ev['last_date']}, {ev['detections']} deteksi -> {e['channel']}")
+    print(f"\nKEJADIAN TERKONFIRMASI (baru): {len(events)}" + ("" if events else " (tidak ada)"))
+    for e in sorted(events, key=lambda e: -e["area_ha"]):
+        ev = e["evidence"]
+        extra = f"{ev.get('members', 1)} bagian" + (f", {len(ev['hotspots'])} klaster titik api"
+                                                     if ev.get("hotspots") else "")
+        print(f"  {e['priority']:7s} {KIND_LABEL.get(e['kind'], e['kind']):11s} ({e['lat']:.4f}, {e['lon']:.4f}) "
+              f"{e['area_ha']:7.1f} ha  periode {e['scene_period']} ({extra}) -> {e['channel']}")
     if pending:
-        biggest = sorted(pending, key=lambda c: -c.area_px)[:10]
-        print(f"  ... {len(pending)} wilayah menunggu periode berikutnya"
-              + (f"; {len(biggest)} terluas:" if len(pending) > len(biggest) else ":"))
+        biggest = sorted(pending, key=lambda c: -c.area_px)[:5]
+        print(f"\nWilayah curiga yang diperiksa ulang pada putaran berikutnya: {len(pending)}"
+              + (f" (5 terluas)" if len(pending) > 5 else ""))
         for c in biggest:
-            print(line(c))
-
-    print(f"\nPERINGATAN BARU: {len(new_alerts)}" + ("" if new_alerts else " (tidak ada)"))
-    for e in new_alerts:
-        print(f"  {e['priority']:7s} {e['kind']:9s} ({e['lat']:.4f}, {e['lon']:.4f}) {e['area_ha']:6.1f} ha "
-              f"periode {e['scene_period']} -> {e['channel']}")
-    if pending:
-        print(f"Wilayah curiga yang diperiksa ulang pada putaran berikutnya: {len(pending)}")
+            lat, lon = c.centroid
+            print(f"  ({lat:.4f}, {lon:.4f}) {c.area_px * env.ha_per_px:7.1f} ha  periode {env.label_of(c.day)}")
     if env.errors:
         print(f"Permintaan gagal ({len(env.errors)}), contoh: {env.errors[0]}")
 
     report = {
-        "kecamatan": region.name, "run_date": run_date,
+        "kecamatan": region.name, "run_date": run_date, "titik_api_sampai": env.now.isoformat(),
         "periode": [env.label_of(d) for d in range(1, env.n_periods + 1)],
+        "tutupan_lahan_ha": cover,
         "peringatan_baru": new_alerts,
         "menunggu": [{"periode": env.label_of(c.day), "lat": c.centroid[0], "lon": c.centroid[1],
                       "area_ha": round(c.area_px * env.ha_per_px, 2), "bukti": c.evidence} for c in pending],
@@ -205,7 +230,8 @@ def run_kecamatan(args, region, env=None) -> dict:
                                                   encoding="utf-8")
     plot(model, env, out_dir / f"peta_{stamp}.png")
     print(f"Hasil: {out_dir} (laporan_{stamp}.json, peta_{stamp}.png, riwayat_peringatan.json, peringatan.geojson)")
-    return {"region": region.name, "ok": True, "new": len(new_alerts), "pending": len(pending)}
+    return {"region": region.name, "ok": True, "new": len(new_alerts), "pending": len(pending),
+            "hotspots": len(hotspots), "events": len(events)}
 
 
 def plot(model, env, path: Path):
@@ -213,32 +239,49 @@ def plot(model, env, path: Path):
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib.colors import ListedColormap
 
     last = max(model.archive) if model.archive else None
     if last is None:
         return
-    ref = model.detectors[0].reference_composite(last)
-    fig, axes = plt.subplots(1, 2, figsize=(14, 7 * env.shape[0] / max(env.shape[1], 1) + 1))
-    panels = [(axes[0], ref, "NDVI acuan (2 periode sebelumnya)"), (axes[1], model.archive[last].ndvi,
-                                                                     f"NDVI {env.label_of(last)}")]
-    style = {"fire": ("*", "red"), "logging": ("s", "saddlebrown"), "uncertain": ("o", "royalblue")}
-    for ax, img, title in panels:
-        ax.set_facecolor("#dddddd")
-        if img is not None:
-            ax.imshow(img, cmap="YlGn", vmin=0, vmax=1, interpolation="nearest")
-        ax.contour(env.region_mask.astype(float), levels=[0.5], colors="black", linewidths=0.6)
-        ax.set_title(title, fontsize=10)
-        ax.set_xticks([]), ax.set_yticks([])
+    fig, axes = plt.subplots(1, 2, figsize=(15, 7 * env.shape[0] / max(env.shape[1], 1) + 1.2))
+    lc = env.landcover()
+    ax = axes[0]
+    ax.set_facecolor("white")
+    if lc is not None:
+        ax.imshow(lc, cmap=ListedColormap(["#1b7837", "#e6ab02", "#d9d9d9"]), vmin=0.5, vmax=3.5,
+                  interpolation="nearest")
+    ax.set_title("Tutupan lahan: hijau = hutan alam, kuning = sawit, abu-abu = lahan lain", fontsize=9)
+    ax = axes[1]
+    ax.set_facecolor("#dddddd")
+    ax.imshow(model.archive[last].ndvi, cmap="YlGn", vmin=0, vmax=1, interpolation="nearest")
+    ax.set_title(f"NDVI hutan alam {env.label_of(last)} + peringatan", fontsize=9)
+    for a in axes:
+        a.contour(env.region_mask.astype(float), levels=[0.5], colors="black", linewidths=0.6)
+        a.set_xticks([]), a.set_yticks([])
+
+    k = env.hs_block
+    if model.hotspot_agent:
+        colors = {"hutan": "red", "sawit": "darkorange", "lahan lain": "purple"}
+        for cl in model.hotspot_agent.clusters:
+            rr, cc = zip(*cl["cells"])
+            for a in axes:
+                a.scatter([(c + 0.5) * k for c in cc], [(r + 0.5) * k for r in rr], marker="^", s=18,
+                          color=colors[cl["landcover"]], linewidths=0)
+    style = {"fire": ("*", "red"), "logging": ("s", "saddlebrown")}
+    for inc in (model.incident_agent.incidents if model.incident_agent else []):
+        rr, cc = np.nonzero(inc.mask)
+        mk, col = style.get(inc.kind, ("x", "black"))
+        size = 80 + 4 * np.sqrt(inc.mask.sum())
+        axes[1].scatter(cc.mean(), rr.mean(), marker=mk, s=size, facecolors="none", edgecolors=col, linewidths=1.6)
     for c in model.cases.values():
-        rr, cc = np.nonzero(c.mask)
-        if c.status == CONFIRMED or c.status == UNCERTAIN:
-            mk, col = style.get(c.cause if c.status == CONFIRMED else "uncertain", ("x", "black"))
-            axes[1].scatter(cc.mean(), rr.mean(), marker=mk, s=110, facecolors="none", edgecolors=col, linewidths=1.5)
-        elif c.status == PENDING:
-            axes[1].scatter(cc.mean(), rr.mean(), marker="o", s=110, facecolors="none", edgecolors="orange",
-                            linewidths=1.5, linestyles="dashed")
-    fig.suptitle(f"Kecamatan {env.region.name}: abu-abu = bukan hutan / tertutup awan. Bintang = kebakaran, "
-                 "kotak = tebang liar, lingkaran oranye = curiga (menunggu)", fontsize=9)
+        if c.status == PENDING:
+            rr, cc = np.nonzero(c.mask)
+            axes[1].scatter(cc.mean(), rr.mean(), marker="o", s=60, facecolors="none", edgecolors="orange",
+                            linewidths=1.2)
+    fig.suptitle(f"Kecamatan {env.region.name}. Segitiga = titik api VIIRS (merah: hutan, oranye: sawit, "
+                 "ungu: lahan lain); bintang = kebakaran, kotak = tebang liar (ukuran ~ luas); "
+                 "lingkaran oranye = curiga, menunggu", fontsize=8)
     fig.tight_layout()
     fig.savefig(path, dpi=120, bbox_inches="tight")
     plt.close(fig)

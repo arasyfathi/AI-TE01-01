@@ -11,6 +11,8 @@ from .agents import (
     UNCERTAIN,
     ChangeDetectionAgent,
     DataIngestionAgent,
+    HotspotAgent,
+    IncidentAgent,
     NotificationAgent,
     ValidationAgent,
 )
@@ -19,7 +21,7 @@ from .messaging import MessageBus
 
 # Urutan giliran agen tiap hari (pipeline). Pesan yang dikirim pada hari yang
 # sama langsung bisa dibaca oleh agen yang gilirannya lebih belakang.
-PIPELINE = (DataIngestionAgent, ChangeDetectionAgent, ValidationAgent, NotificationAgent)
+PIPELINE = (DataIngestionAgent, HotspotAgent, ChangeDetectionAgent, ValidationAgent, IncidentAgent, NotificationAgent)
 
 
 class ForestMonitoringModel(mesa.Model):
@@ -38,6 +40,8 @@ class ForestMonitoringModel(mesa.Model):
         reference_lags: tuple[int, int] = (9, 5),
         resolve_after_validation: bool = False,
         reference_mode: str = "median",
+        hotspot_kwargs: dict | None = None,
+        incident_kwargs: dict | None = None,
     ):
         """``env``: lingkungan data apa pun yang memenuhi antarmuka ``ForestEnvironment``
         (misalnya ``GEEEnvironment``). Bila kosong, dipakai lingkungan sintetis.
@@ -45,6 +49,8 @@ class ForestMonitoringModel(mesa.Model):
         ``reference_lags``: langkah acuan (dari, sampai) sebelum langkah sekarang; (9, 5) = H-9..H-5.
         ``reference_mode``: "median" (median langkah acuan) atau "latest" (pengamatan bersih terakhir per
         piksel; dipakai pada siklus 2 minggu agar kehilangan lama tidak terdeteksi ulang).
+        ``hotspot_kwargs`` / ``incident_kwargs``: bila diberikan (dict, boleh kosong), Agen Titik Api /
+        Agen Pengelompokan Kejadian ikut dijalankan.
         ``resolve_after_validation``: detektor membaca vonis validator pada langkah yang sama
         (penting bila satu langkah = 2 minggu, agar kebakaran tidak tertunda satu periode)."""
         super().__init__(rng=seed)
@@ -74,6 +80,10 @@ class ForestMonitoringModel(mesa.Model):
             else []
         )
         self.notifier = NotificationAgent(self, ha_per_px=getattr(self.env, "ha_per_px", 1.0), verbose=verbose)
+        self.hotspot_agent = HotspotAgent(self, **hotspot_kwargs) if hotspot_kwargs is not None else None
+        self.incident_agent = IncidentAgent(self, **incident_kwargs) if incident_kwargs is not None else None
+        # Detektor melapor ke Agen Pengelompokan Kejadian bila ada, selain itu langsung ke Notifikasi.
+        self.report_to = (self.incident_agent or self.notifier).name
 
         self.datacollector = mesa.DataCollector(
             model_reporters={
@@ -102,7 +112,7 @@ class ForestMonitoringModel(mesa.Model):
         self.env.advance_day()
         self.day = self.env.day
         for agent_type in PIPELINE:
-            if agent_type is NotificationAgent and self.resolve_after_validation:
+            if agent_type is IncidentAgent and self.resolve_after_validation:
                 for det in self.detectors:
                     det.resolve_pending()
             agents = self.agents_by_type.get(agent_type)

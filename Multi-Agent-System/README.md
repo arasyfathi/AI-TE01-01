@@ -19,6 +19,8 @@ berbeda sebelum peringatan dikirim ke pihak berwenang.
 | **Agen Deteksi Perubahan** | `ChangeDetectionAgent` | Membandingkan citra hari ini dengan komposit median citra **minggu lalu** (H-9 s.d. H-5), mencari area hijau yang hilang drastis, lalu memeriksa apakah kehilangan itu **menetap**. Jumlahnya bisa lebih dari satu; wilayah dibagi per detektor. |
 | **Agen Validasi** | `ValidationAgent` | Memeriksa anomali **suhu permukaan (termal)** di wilayah curiga: sangat panas → kebakaran, sedikit hangat → tebang liar, lebih dingin → awan/alarm palsu. Bisa lebih dari satu; tugas dibagi ke validator dengan antrean tersingkat (*load balancing*). |
 | **Agen Notifikasi** | `NotificationAgent` | Menerima laporan hasil konsensus, menentukan prioritas dan kanal tujuan, mengirim peringatan, dan memperbarui peringatan bila area kebakaran meluas. |
+| **Agen Titik Api** (mode 2 mingguan) | `HotspotAgent` | Peringatan dini langsung dari titik api VIIRS sampai hari ini, tanpa menunggu citra bebas awan. Klaster titik api diberi label tutupan lahan: hutan alam → DARURAT, kebun sawit → SIAGA, lahan lain → WASPADA. |
+| **Agen Pengelompokan Kejadian** (mode 2 mingguan) | `IncidentAgent` | Menyatukan kasus terkonfirmasi yang berjarak < 500 m menjadi satu kejadian. Kejadian yang bersinggungan dengan bukti api atau klaster titik api dicatat sebagai kebakaran, termasuk tepi bekas terbakar yang lolos dari piksel titik api. |
 
 ## 2. Interaksi & konsensus
 
@@ -96,7 +98,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 57 pengujian
+python -m pytest -q tests                             # 61 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
@@ -239,7 +241,9 @@ NASA mengumumkan Terra dan Aqua (pembawa MODIS) mulai dimatikan pada akhir 2026/
 | Bukti | Koleksi GEE | Pemrosesan |
 | :--- | :--- | :--- |
 | NDVI 30 m (bawaan) | `COPERNICUS/S2_SR_HARMONIZED` | komposit median periode; piksel berawan dibuang dengan Cloud Score+ (`GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED`, `cs_cdf` ≥ 0,6) |
-| Masker hutan | `ESA/WorldCover/v200` (2021) | hanya tutupan pohon (10) dan mangrove (95) yang dipantau, agar panen sawah/kebun tidak menjadi alarm palsu |
+| Hutan alam | `JRC/GFC2020/V4` (2020) | hutan menurut definisi EUDR, yang mengecualikan perkebunan komoditas termasuk sawit |
+| Kebun sawit | `BIOPAMA/GlobalOilPalm/v1_2` (2016–2021) | sawit industri dan sawit rakyat; dikeluarkan dari pemantauan NDVI |
+| Titik api harian | koleksi VIIRS yang sama | jumlah deteksi, tanggal pertama/terakhir, FRP per sel ~375 m untuk Agen Titik Api |
 | Titik api | `NASA/LANCE/SNPP_VIIRS/C2` + `NASA/LANCE/NOAA20_VIIRS/C2` | ada titik api berkeyakinan nominal/tinggi dalam periode = bukti kebakaran |
 
 **Cara kerja satu putaran**
@@ -247,7 +251,13 @@ NASA mengumumkan Terra dan Aqua (pembawa MODIS) mulai dimatikan pada akhir 2026/
   acuan dan 2 periode yang dipantau. Satu langkah Mesa = satu periode.
 - Acuan = **pengamatan bersih terakhir** per piksel (periode sebelumnya; bila berawan, mundur satu periode),
   sehingga kehilangan yang sudah dilaporkan tidak terdeteksi ulang pada putaran berikutnya.
-- **Kebakaran dikonfirmasi pada periode yang sama** (penurunan NDVI + titik api VIIRS di lokasi itu).
+- **NDVI hanya dipantau di hutan alam.** Uji pertama di Rasau Jaya memakai masker ESA WorldCover; saat dibuka di
+  Google Earth, kebanyakan peringatan ternyata berada di kebun sawit, karena kelas "tutupan pohon" WorldCover
+  juga mencakup sawit. Pembukaan/peremajaan sawit bukan deforestasi, jadi kini dikeluarkan.
+- **Agen Titik Api** memberi peringatan dini dari titik api VIIRS di seluruh lahan, termasuk kebun sawit,
+  sampai hari ini (bukan hanya sampai periode lengkap terakhir).
+- **Kebakaran dikonfirmasi pada periode yang sama** (penurunan NDVI + titik api VIIRS di lokasi itu), lalu
+  **Agen Pengelompokan Kejadian** menyatukan fragmen yang berdekatan menjadi satu kejadian.
 - **Tebang liar dikonfirmasi** bila periode berikutnya membuktikan kehilangan menetap; bila NDVI pulih
   (kabut, awan tipis), kasus ditolak. Kasus di periode terakhir menunggu putaran berikutnya.
 - Peringatan baru ditambahkan ke `riwayat_peringatan.json` per kecamatan; menjalankan ulang tidak menggandakan.
@@ -276,7 +286,10 @@ menunggu), `peta_<periode>.png` (NDVI acuan vs terbaru dengan penanda), `riwayat
 - Katalog GEE mencatat data titik api NOAA-20 hingga 13 September 2026 dan Suomi NPP hingga 19 Oktober 2026;
   pengiriman data Suomi NPP dihentikan NASA pada 2 November 2026. Bila semua sumber titik api berhenti,
   ringkasan menampilkan "tak ada data" dan kebakaran tidak dapat dikonfirmasi lewat jalur cepat.
-- Masker hutan berasal dari 2021: lahan yang sudah dibuka sejak 2021 tidak lagi dipantau.
+- Peta hutan alam berasal dari 2020 dan peta sawit dari 2016–2021: kebun sawit yang dibuka setelahnya bisa
+  masih tercatat sebagai hutan alam, dan hutan yang dibuka sejak 2020 tidak lagi dipantau.
+- Titik api VIIRS berukuran ~375 m; satu titik api bisa mencakup batas hutan dan kebun, sehingga label tutupan
+  lahan diambil dari porsi terbesar di sel tersebut.
 - Uji otomatis memakai data periode tiruan dan objek `ee` palsu; panggilan ke server GEE sungguhan belum
   teruji dari lingkungan pengembangan.
 

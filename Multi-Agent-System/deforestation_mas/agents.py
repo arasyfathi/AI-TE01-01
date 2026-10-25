@@ -21,6 +21,7 @@ Konsensus: kasus hanya dinyatakan nyata bila DUA bukti independen setuju.
 
 from __future__ import annotations
 
+import datetime as dt
 import warnings
 from dataclasses import dataclass, field
 
@@ -259,7 +260,7 @@ class ChangeDetectionAgent(MonitorAgent):
                 target.mask = target.mask | new_part
                 if target.status == CONFIRMED and new_part.sum() >= 2:
                     self.send(
-                        INFORM, self.model.notifier.name, "update",
+                        INFORM, self.model.report_to, "update",
                         {"case_id": target.case_id, "added_px": int(new_part.sum())},
                         target.case_id,
                     )
@@ -375,7 +376,7 @@ class ChangeDetectionAgent(MonitorAgent):
         case.decided_day = self.model.day
         if status in (CONFIRMED, UNCERTAIN):
             self.send(
-                INFORM, self.model.notifier.name, "report",
+                INFORM, self.model.report_to, "report",
                 {"case_id": case.case_id, "status": status, "cause": cause},
                 case.case_id,
             )
@@ -563,6 +564,8 @@ class Alert:
     confidence: float
     evidence: dict
     updates: list = field(default_factory=list)  # riwayat perluasan: {day, from_ha, to_ha}
+    anchor_lat: float | None = None  # titik tetap untuk mengenali peringatan yang sama antar-putaran
+    anchor_lon: float | None = None
 
     def to_dict(self) -> dict:
         return {k: getattr(self, k) for k in self.__dataclass_fields__}
@@ -582,6 +585,12 @@ class NotificationAgent(MonitorAgent):
 
     def step(self):
         for msg in self.inbox():
+            if msg.topic == "hotspot":
+                self._alert_hotspot(msg.content)
+                continue
+            if msg.topic in ("incident", "incident_update"):
+                self._alert_incident(msg.content)
+                continue
             case = self.model.cases[msg.content["case_id"]]
             if msg.topic == "report" and case.case_id not in self.by_case:
                 self._alert(case, msg.content["status"])
@@ -624,3 +633,238 @@ class NotificationAgent(MonitorAgent):
                 f"  [hari {self.model.day:3d}] {alert.priority:7s} {alert.alert_id} {kind:9s} "
                 f"({alert.lat:.4f}, {alert.lon:.4f}) {alert.area_ha:4.0f} ha -> {alert.channel}"
             )
+
+    # -- laporan dari Agen Titik Api dan Agen Pengelompokan Kejadian ---------------------------
+    def _new_alert(self, key, kind, priority, channel, scene_day, lat, lon, area_ha, confidence, evidence,
+                   anchor=None):
+        alert = Alert(
+            alert_id=f"ALERT-{len(self.model.alerts) + 1:03d}", case_id=key, kind=kind, priority=priority,
+            channel=channel, scene_day=scene_day, alert_day=self.model.day, lat=round(lat, 5), lon=round(lon, 5),
+            initial_area_ha=area_ha, area_ha=area_ha, confidence=confidence, evidence=evidence,
+            anchor_lat=anchor[0] if anchor else None, anchor_lon=anchor[1] if anchor else None,
+        )
+        self.model.alerts.append(alert)
+        self.by_case[key] = alert
+        return alert
+
+    def _alert_hotspot(self, c: dict):
+        priority, channel = HOTSPOT_CHANNELS[c["landcover"]]
+        evidence = {k: c[k] for k in ("first_date", "last_date", "detections", "frp_max", "landcover",
+                                      "forest_share", "palm_share", "window")}
+        self._new_alert(c["cluster_id"], "hotspot", priority, channel, c["day"], c["lat"], c["lon"],
+                        c["area_ha"], 0.9, evidence, anchor=c["anchor"])
+
+    def _alert_incident(self, c: dict):
+        evidence = {k: c[k] for k in ("members", "member_ids", "hotspots", "causes")}
+        alert = self.by_case.get(c["incident_id"])
+        if alert is None:
+            priority, channel = CHANNELS.get(c["kind"], CHANNELS["unknown"])
+            self._new_alert(c["incident_id"], c["kind"], priority, channel, c["scene_day"], c["lat"], c["lon"],
+                            c["area_ha"], c["confidence"], evidence, anchor=c["anchor"])
+            return
+        change = {"day": self.model.day, "from_ha": alert.area_ha, "to_ha": c["area_ha"]}
+        if c["kind"] != alert.kind:
+            change.update(from_kind=alert.kind, to_kind=c["kind"])
+            alert.kind = c["kind"]
+            alert.priority, alert.channel = CHANNELS.get(c["kind"], CHANNELS["unknown"])
+        alert.area_ha = c["area_ha"]
+        alert.lat, alert.lon = round(c["lat"], 5), round(c["lon"], 5)
+        alert.evidence = evidence
+        alert.updates.append(change)
+
+
+HOTSPOT_CHANNELS = {
+    "hutan": ("DARURAT", "Tim Pemadam Kebakaran Hutan"),
+    "sawit": ("SIAGA", "Pengelola kebun sawit dan BPBD"),
+    "lahan lain": ("WASPADA", "BPBD / tim pemadam setempat"),
+}
+
+
+# ---------------------------------------------------------------------------
+class HotspotAgent(MonitorAgent):
+    """Agen Titik Api: peringatan dini langsung dari titik api VIIRS, tanpa menunggu citra optik bebas awan.
+
+    Setiap langkah, sel titik api (~375 m) yang bersebelahan dikelompokkan menjadi satu klaster. Klaster
+    diberi label tutupan lahan (hutan alam / kebun sawit / lahan lain) yang menentukan prioritasnya, lalu
+    dikirim ke Agen Notifikasi (peringatan dini) dan ke Agen Pengelompokan Kejadian (untuk menautkannya
+    dengan bekas terbakar yang nanti terlihat di NDVI).
+    """
+
+    role = "hotspot"
+
+    def __init__(self, model, name="hotspot", start_day=1, share=0.5):
+        super().__init__(model, name)
+        self.start_day = start_day  # langkah sebelumnya hanya acuan, tidak diberi peringatan
+        self.share = share
+        self.clusters: list[dict] = []
+
+    def step(self):
+        env, day = self.model.env, self.model.day
+        if day < self.start_day or not hasattr(env, "fetch_hotspots"):
+            return
+        hs = env.fetch_hotspots(day)
+        cover = env.hotspot_landcover()
+        if hs is None or cover is None:
+            return
+        forest, palm = cover
+        start, end = env.hotspot_window(day)
+        labels, n = ndimage.label(hs["count"] > 0, structure=EIGHT)
+        for lab in range(1, n + 1):
+            cells = labels == lab
+            rr, cc = np.nonzero(cells)
+            first = hs["first"][rr, cc]
+            first = np.where(np.isfinite(first), first, np.inf)
+            i = int(np.lexsort((cc, rr, first))[0])  # sel paling awal menyala: jangkar yang tetap
+            f_share, p_share = float(forest[cells].mean()), float(palm[cells].mean())
+            landcover = "hutan" if f_share >= self.share else "sawit" if p_share >= self.share else "lahan lain"
+            lat, lon = env.hs_to_latlon(rr.mean(), cc.mean())
+            first_day = float(np.nanmin(hs["first"][cells])) if np.isfinite(hs["first"][cells]).any() else 0.0
+            last_day = float(np.nanmax(hs["last"][cells])) if np.isfinite(hs["last"][cells]).any() else first_day
+            frp = hs["frp"][cells]
+            cluster = {
+                "cluster_id": f"HS-{day}-{lab:03d}",
+                "day": day,
+                "window": f"{start.isoformat()} s.d. {(end - dt.timedelta(days=1)).isoformat()}",
+                "first_date": (start + dt.timedelta(days=int(first_day))).isoformat(),
+                "last_date": (start + dt.timedelta(days=int(last_day))).isoformat(),
+                "detections": int(hs["count"][cells].sum()),
+                "frp_max": round(float(np.nanmax(frp)), 1) if np.isfinite(frp).any() else None,
+                "landcover": landcover,
+                "forest_share": round(f_share, 2),
+                "palm_share": round(p_share, 2),
+                "lat": lat, "lon": lon,
+                "anchor": env.hs_to_latlon(rr[i], cc[i]),
+                "area_ha": float(cells.sum() * env.hs_block ** 2 * env.ha_per_px),
+                "cells": list(zip(rr.tolist(), cc.tolist())),
+            }
+            self.clusters.append(cluster)
+            self.send(INFORM, self.model.notifier.name, "hotspot", cluster, cluster["cluster_id"])
+            if self.model.incident_agent is not None:
+                self.send(INFORM, self.model.incident_agent.name, "hotspot", cluster, cluster["cluster_id"])
+
+
+# ---------------------------------------------------------------------------
+@dataclass(eq=False)  # dibandingkan berdasarkan identitas (berisi larik numpy)
+class Incident:
+    incident_id: str
+    kind: str
+    scene_day: int
+    mask: np.ndarray
+    zone: np.ndarray  # mask yang diperlebar sejauh jarak penggabungan
+    anchor: tuple[float, float]
+    members: list = field(default_factory=list)
+    hotspots: list = field(default_factory=list)
+    confidence: float = 0.0
+    reported: bool = False
+
+
+class IncidentAgent(MonitorAgent):
+    """Agen Pengelompokan Kejadian: menyatukan kasus terkonfirmasi yang berdekatan menjadi satu kejadian.
+
+    * Kasus yang berjarak kurang dari ``merge_px`` piksel (bawaan ~500 m) digabung: satu bekas terbakar
+      yang terpotong awan/masker menjadi satu peringatan, bukan puluhan.
+    * Penyebab ditentukan per kejadian: kebakaran bila ada anggota yang terbukti terbakar atau ada klaster
+      titik api dari Agen Titik Api di sekitarnya; selain itu tebang liar. Tepi bekas terbakar yang lolos
+      dari piksel titik api ikut tercatat sebagai kebakaran.
+    * Kasus "perlu tinjauan" diteruskan apa adanya ke Agen Notifikasi.
+    """
+
+    role = "incident"
+
+    def __init__(self, model, name="incident", merge_px=17):
+        super().__init__(model, name)
+        self.merge_px = merge_px
+        self.incidents: list[Incident] = []
+        self.hotspots: list[dict] = []
+        self._counter = 0
+
+    def _dilate(self, mask: np.ndarray) -> np.ndarray:
+        rows, cols = np.nonzero(mask)
+        m = self.merge_px + 1
+        box = (slice(max(0, rows.min() - m), rows.max() + m + 1), slice(max(0, cols.min() - m), cols.max() + m + 1))
+        out = np.zeros_like(mask)
+        out[box] = ndimage.binary_dilation(mask[box], structure=EIGHT, iterations=self.merge_px)
+        return out
+
+    def _touches(self, inc: Incident, cluster: dict) -> bool:
+        env = self.model.env
+        return any(inc.zone[env.hs_box(hr, hc)].any() for hr, hc in cluster["cells"])
+
+    def step(self):
+        changed: list[Incident] = []
+        for msg in self.inbox():
+            if msg.topic == "hotspot":
+                self.hotspots.append(msg.content)
+                for inc in self.incidents:
+                    if self._link(inc, msg.content):
+                        changed.append(inc)
+            elif msg.topic == "report":
+                case = self.model.cases[msg.content["case_id"]]
+                if msg.content["status"] != CONFIRMED:
+                    self.model.bus.send(Message(msg.performative, self.name, self.model.notifier.name, msg.topic,
+                                                msg.content, msg.conversation_id, self.model.day))
+                    continue
+                changed.append(self._attach(case))
+            elif msg.topic == "update":
+                case = self.model.cases[msg.content["case_id"]]
+                for inc in self.incidents:
+                    if case.case_id in inc.members:
+                        inc.mask |= case.mask
+                        inc.zone = self._dilate(inc.mask)
+                        changed.append(inc)
+        seen = set()
+        for inc in changed:  # urutan tetap, tanpa duplikat; lewati kejadian yang sudah digabung
+            if id(inc) in seen or inc not in self.incidents:
+                continue
+            seen.add(id(inc))
+            self._report(inc)
+
+    def _link(self, inc: Incident, cluster: dict) -> bool:
+        if cluster["cluster_id"] in inc.hotspots or not self._touches(inc, cluster):
+            return False
+        inc.hotspots.append(cluster["cluster_id"])
+        inc.kind = "fire"
+        return True
+
+    def _attach(self, case: Case) -> Incident:
+        zone = self._dilate(case.mask)
+        hits = [inc for inc in self.incidents if (inc.mask & zone).any()]
+        if not hits:
+            self._counter += 1
+            inc = Incident(f"INC-{self._counter:03d}", case.cause or "unknown", case.day, case.mask.copy(), zone,
+                           anchor=case.centroid, members=[case.case_id], confidence=case.val_confidence)
+            self.incidents.append(inc)
+        else:
+            inc = hits[0]
+            for other in hits[1:]:  # kasus ini menjembatani beberapa kejadian: satukan
+                inc.mask |= other.mask
+                inc.members += other.members
+                inc.hotspots += [h for h in other.hotspots if h not in inc.hotspots]
+                inc.kind = "fire" if "fire" in (inc.kind, other.kind) else inc.kind
+                self.incidents.remove(other)
+            inc.mask |= case.mask
+            inc.zone = self._dilate(inc.mask)
+            inc.members.append(case.case_id)
+            inc.confidence = max(inc.confidence, case.val_confidence)
+            if case.cause == "fire":
+                inc.kind = "fire"
+        for cluster in self.hotspots:
+            self._link(inc, cluster)
+        return inc
+
+    def _report(self, inc: Incident):
+        env = self.model.env
+        rr, cc = np.nonzero(inc.mask)
+        lat, lon = env.to_latlon(rr.mean(), cc.mean())
+        causes = [self.model.cases[m].cause for m in inc.members]
+        content = {
+            "incident_id": inc.incident_id, "kind": inc.kind, "scene_day": inc.scene_day,
+            "lat": lat, "lon": lon, "anchor": inc.anchor,
+            "area_ha": float(inc.mask.sum() * env.ha_per_px), "confidence": inc.confidence,
+            "members": len(inc.members), "member_ids": list(inc.members), "hotspots": list(inc.hotspots),
+            "causes": {c: causes.count(c) for c in set(causes)},
+        }
+        topic = "incident_update" if inc.reported else "incident"
+        inc.reported = True
+        self.send(INFORM, self.model.notifier.name, topic, content, inc.incident_id)
+
