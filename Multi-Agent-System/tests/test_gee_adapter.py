@@ -275,3 +275,62 @@ def test_check_reports_failure_cleanly(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(run_gee, "make_env", lambda args: Broken(make_world(1, 5)))
     assert run_gee.main(["--check", "--out", str(tmp_path)]) == 1
     assert "Permission denied" in capsys.readouterr().out
+
+
+# --- Menjalankan kode pembangun ekspresi GEE yang sesungguhnya dengan objek `ee` palsu -------------
+# (tidak memeriksa makna ekspresi di server, tetapi menangkap kesalahan Python seperti None[...])
+
+def _stub_ee(images_per_day=1, pixels=None):
+    from unittest.mock import MagicMock
+
+    ee = MagicMock()
+    coll = ee.ImageCollection.return_value.filterDate.return_value
+    coll.size.return_value.getInfo.return_value = images_per_day
+    ee.data.computePixels.return_value = np.full((40, 40, 3), 0.5) if pixels is None else pixels
+    return ee
+
+
+def test_check_works_without_replay_listing():
+    """Mode --check tidak memuat daftar tanggal replay; sebelumnya ini memicu 'NoneType is not subscriptable'."""
+    ee = _stub_ee()
+    env = GEEEnvironment(project="x", size=40, cache_dir=None, retries=1)
+    env._ee = ee
+    assert env._dates is None
+    stats, data = env.check("2023-08-20")
+    assert stats["ndvi"]["valid_pct"] == 100.0 and data["fire"].shape == (40, 40)
+    request = ee.data.computePixels.call_args[0][0]
+    assert request["fileFormat"] == "NUMPY_NDARRAY" and request["grid"]["crsCode"] == "EPSG:4326"
+    assert "expression" in request
+
+
+def test_check_reports_missing_modis_day():
+    ee = _stub_ee(images_per_day=0)
+    env = GEEEnvironment(project="x", size=40, cache_dir=None, retries=1)
+    env._ee = ee
+    with pytest.raises(RuntimeError, match="MOD09GQ"):
+        env.check("2023-08-20")
+
+
+def test_check_reports_server_error_with_type():
+    ee = _stub_ee()
+    ee.data.computePixels.side_effect = PermissionError("Caller does not have permission")
+    env = GEEEnvironment(project="x", size=40, cache_dir=None, retries=1)
+    env._ee = ee
+    with pytest.raises(RuntimeError, match="PermissionError: Caller does not have permission"):
+        env.check("2023-08-20")
+
+
+def test_replay_listing_and_download_with_stub_ee():
+    from unittest.mock import MagicMock
+
+    ms = [int(dt.datetime(2023, 8, d, tzinfo=dt.timezone.utc).timestamp() * 1000) for d in (15, 16, 18)]
+    ee = _stub_ee()
+    ee.ImageCollection.return_value.filterDate.return_value.aggregate_array.return_value.getInfo.return_value = ms
+    env = GEEEnvironment(project="x", size=40, n_days=10, cache_dir=None, retries=1)
+    env._ee = ee
+    env.day = 5
+    assert env.available_days() == [1, 2, 4]  # 15, 16, 18 Agustus
+    assert env.download(2).ndvi.shape == (40, 40)
+    assert env.download(3) is None  # 17 Agustus tidak ada citra
+    assert env.fetch_fire(4).shape == (40, 40)
+    assert isinstance(ee.ImageCollection, MagicMock)

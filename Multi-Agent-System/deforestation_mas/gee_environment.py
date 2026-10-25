@@ -80,6 +80,7 @@ class GEEEnvironment:
         self.errors: list[str] = []
         self._ee = None
         self._dates: dict[str, set[str]] | None = None
+        self._exists_cache: dict[tuple[str, str], bool] = {}
         self._mem: dict[int, dict[str, np.ndarray]] = {}
         self._failures: dict[int, int] = {}
 
@@ -135,7 +136,12 @@ class GEEEnvironment:
             return ee.ImageCollection(cid).filterDate(d0, d1).mosaic()
 
         empty = lambda name: ee.Image.constant(0).selfMask().rename(name)  # noqa: E731 - seluruhnya tertutup
-        has = self._dates
+
+        if not (self._exists(ee, "sr250", date) and self._exists(ee, "sr500", date)):
+            raise LookupError(
+                f"tidak ada citra {COLLECTIONS['sr250']} / {COLLECTIONS['sr500']} pada {date} "
+                "(data MODIS biasanya terlambat beberapa hari; coba tanggal yang lebih lama)"
+            )
 
         # NDVI 250 m + masker awan/asap dari state_1km
         gq, ga = day_image(COLLECTIONS["sr250"]), day_image(COLLECTIONS["sr500"])
@@ -155,7 +161,7 @@ class GEEEnvironment:
         ndvi = ndvi.updateMask(cloudy.Not()).updateMask(hazy.Not()).updateMask(ndvi.gte(-0.2).And(ndvi.lte(1)))
 
         # Suhu permukaan siang (K -> C), buang piksel "tidak ada LST" (awan)
-        if date in has["lst"]:
+        if self._exists(ee, "lst", date):
             m = day_image(COLLECTIONS["lst"])
             raw = m.select("LST_Day_1km")
             qc = m.select("QC_Day").bitwiseAnd(3)
@@ -164,7 +170,7 @@ class GEEEnvironment:
             lst = empty("lst")
 
         # Titik api: 1 = api (kelas 7-9), 0 = tanah tanpa api (kelas 5), selain itu tertutup
-        if date in has["fire"]:
+        if self._exists(ee, "fire", date):
             fm = day_image(COLLECTIONS["fire"]).select("FireMask")
             fire = fm.gte(7).updateMask(fm.eq(5).Or(fm.gte(7))).rename("fire")
         else:
@@ -172,14 +178,30 @@ class GEEEnvironment:
 
         return ndvi.addBands(lst).addBands(fire).toFloat().unmask(NODATA)
 
+    def _exists(self, ee, key: str, date: str) -> bool:
+        """Apakah koleksi ``key`` punya citra pada ``date``? Memakai daftar replay bila tanggalnya
+        termasuk di dalamnya; jika tidak (misalnya mode --check), bertanya ke GEE dan menyimpan jawabannya."""
+        if self._dates is not None and self.date_of(1) <= date <= self.date_of(self.n_days):
+            return date in self._dates[key]
+        cache_key = (key, date)
+        if cache_key not in self._exists_cache:
+            d0 = ee.Date(date)
+            n = ee.ImageCollection(COLLECTIONS[key]).filterDate(d0, d0.advance(1, "day")).size().getInfo()
+            self._exists_cache[cache_key] = n > 0
+        return self._exists_cache[cache_key]
+
     def _request_pixels(self, date: str) -> dict[str, np.ndarray] | None:
-        """Satu permintaan ke GEE untuk satu hari. Mengembalikan None bila gagal."""
+        """Satu permintaan ke GEE untuk satu hari. Mengembalikan None bila gagal (alasannya di ``errors``)."""
         ee = self.connect()
-        request = {
-            "expression": self._build_image(ee, date),
-            "fileFormat": "NUMPY_NDARRAY",
-            "grid": self._grid(),
-        }
+        try:
+            request = {
+                "expression": self._build_image(ee, date),
+                "fileFormat": "NUMPY_NDARRAY",
+                "grid": self._grid(),
+            }
+        except Exception as exc:  # noqa: BLE001 - tanggal tanpa data, jaringan saat mengecek koleksi
+            self.errors.append(f"{date}: {type(exc).__name__}: {exc}")
+            return None
         last = None
         for attempt in range(self.retries):
             try:
@@ -187,7 +209,7 @@ class GEEEnvironment:
             except Exception as exc:  # noqa: BLE001 - EEException, HTTP 429, jaringan, autentikasi
                 last = exc
                 time.sleep(min(2 ** attempt, 8))
-        self.errors.append(f"{date}: {last}")
+        self.errors.append(f"{date}: {type(last).__name__}: {last}")
         return None
 
     def _decode(self, arr) -> dict[str, np.ndarray]:

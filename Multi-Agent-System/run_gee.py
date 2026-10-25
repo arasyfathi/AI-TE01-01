@@ -81,7 +81,7 @@ def run_check(args) -> int:
     try:
         stats, data = env.check(date)
     except Exception as exc:  # noqa: BLE001
-        print(f"\nGAGAL: {exc}")
+        print(f"\nGAGAL: {type(exc).__name__}: {exc}")
         print("Periksa: login (earthengine authenticate), --project, dan apakah koleksi MODIS memiliki data pada tanggal itu.")
         return 1
     labels = {"ndvi": "NDVI 250 m (bebas awan)", "lst": "Suhu permukaan siang (C)", "fire": "Titik api (1=api, 0=tidak)"}
