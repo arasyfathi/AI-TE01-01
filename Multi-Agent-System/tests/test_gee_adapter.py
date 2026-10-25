@@ -465,3 +465,80 @@ def test_find_fires_cli(monkeypatch, capsys):
     assert run_gee.main(argv) == 0  # tanpa titik api sama sekali
     assert "Tidak ada titik api" in capsys.readouterr().out
     assert run_gee.main(["--find-fires", "--bbox", "1,2,3"]) == 1
+
+
+# --- Aturan konsensus, ditiru dari kasus nyata Kalimantan Tengah (Sep-Okt 2023) ---------------------
+
+def _case_with_verdict(model, real, cause, strong, det_vote, fire_fraction=None):
+    from deforestation_mas.agents import Case
+    from deforestation_mas.messaging import PROPOSE, Message
+
+    det = model.detectors[0]
+    s = model.env.size
+    mask = np.zeros((s, s), bool)
+    mask[5:9, 5:9] = True
+    case = Case(case_id=f"T{len(model.cases)}", detector=det.name, validator=model.validators[0].name, day=1,
+                mask=mask, reference=np.full((s, s), 0.8), drop=0.3, centroid=(0.0, 0.0), last_check_day=1)
+    case.det_vote = det_vote
+    model.cases[case.case_id] = case
+    det._receive_verdict(Message(PROPOSE, "validator-1", det.name, "verdict", {
+        "case_id": case.case_id, "round": 0, "day": 1, "real": real, "cause": cause, "confidence": 0.9,
+        "strong": strong, "mean_anomaly": None, "hot_fraction": 0.0, "fire_fraction": fire_fraction}))
+    det._try_resolve(case)
+    return case
+
+
+def _gee_model(**detector_kwargs):
+    return ForestMonitoringModel(env=FakeGEE(make_world(1, 5)), validator_kwargs={"fire_from_lst": False},
+                                 detector_kwargs=detector_kwargs or None)
+
+
+def test_fire_fast_track_like_alert_001():
+    """ALERT-001: titik api 93% di lokasi penurunan NDVI, tetapi tak ada citra bersih 10 hari -> dulu 'uncertain'."""
+    case = _case_with_verdict(_gee_model(), True, "fire", True, det_vote=None, fire_fraction=0.93)
+    assert case.status == "confirmed" and case.cause == "fire" and "jalur_cepat" in case.evidence
+
+    case = _case_with_verdict(_gee_model(fire_fast_track=False), True, "fire", True, det_vote=None)
+    assert case.status == "pending"  # kontrol: tanpa jalur cepat tetap menunggu citra bersih
+
+
+def test_weak_logging_vote_cannot_beat_recovered_ndvi_like_alert_004():
+    """ALERT-004/005: NDVI turun hanya 0.02-0.03 (pulih), validator bilang 'tebang liar' karena tak ada api."""
+    case = _case_with_verdict(_gee_model(), True, "logging", False, det_vote=False, fire_fraction=0.0)
+    assert case.status == "dismissed"
+
+
+def test_weak_logging_vote_with_persistent_loss_confirms():
+    case = _case_with_verdict(_gee_model(), True, "logging", False, det_vote=True, fire_fraction=0.0)
+    assert case.status == "confirmed" and case.cause == "logging"
+
+
+def test_strong_disagreement_still_gets_another_round():
+    model = _gee_model()
+    case = _case_with_verdict(model, True, "logging", True, det_vote=False)
+    assert case.status == "pending" and case.round == 1  # suara kuat: kumpulkan bukti lagi, jangan buang
+    case = _case_with_verdict(model, None, "inconclusive", False, det_vote=False)
+    assert case.status == "dismissed"  # validator tak punya bukti, NDVI pulih
+
+
+def test_fire_confirmed_end_to_end_when_ndvi_stays_cloudy():
+    """Seperti kasus nyata: api terdeteksi MODIS, tetapi NDVI tertutup awan/asap terus setelahnya."""
+    world = make_world(4, 60, p_logging=0, p_fire=0.3, p_cloud=0)
+    fire_day = min(e.start_day for e in world.events if e.start_day >= 12)
+    env = FakeGEE(world)
+    orig = env._request_pixels
+
+    def ndvi_cloudy_after_fire(date):
+        data = orig(date)
+        day = (dt.date.fromisoformat(date) - env.start).days + 1
+        if data is not None and day > fire_day:
+            data = dict(data, ndvi=np.full_like(data["ndvi"], np.nan))  # suhu & titik api tetap teramati
+        return data
+
+    env._request_pixels = ndvi_cloudy_after_fire
+    model = ForestMonitoringModel(env=env, validator_kwargs={"fire_from_lst": False})
+    for _ in range(fire_day + 15):
+        model.step()
+    first = [c for c in model.cases.values() if c.day == fire_day]
+    assert first and all(c.status == "confirmed" and c.cause == "fire" for c in first)
+    assert all(c.decided_day <= fire_day + 1 for c in first)  # peringatan keesokan harinya, bukan setelah 10 hari

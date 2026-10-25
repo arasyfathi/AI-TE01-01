@@ -55,6 +55,8 @@ def parse_args(argv=None):
     p.add_argument("--drop-threshold", type=float, default=0.20, help="penurunan NDVI yang dianggap drastis")
     p.add_argument("--persist-threshold", type=float, default=0.15, help="penurunan NDVI minimal agar dianggap menetap")
     p.add_argument("--min-pixels", type=int, default=4, help="luas minimal wilayah curiga (piksel)")
+    p.add_argument("--max-wait", type=int, default=20,
+                   help="hari maksimal menunggu citra bersih sebelum kasus diserahkan ke analis")
     p.add_argument("--cache-dir", default=str(HERE / "gee_cache"))
     p.add_argument("--out", type=Path, default=HERE / "output_gee")
     p.add_argument("--quiet", action="store_true")
@@ -76,6 +78,7 @@ def build_model(args, env) -> ForestMonitoringModel:
             "drop_threshold": args.drop_threshold,
             "persist_threshold": args.persist_threshold,
             "min_pixels": args.min_pixels,
+            "max_wait_days": args.max_wait,
         },
         # Pada data nyata tanah gundul pun lebih panas, jadi kebakaran hanya dibuktikan oleh titik api MODIS.
         validator_kwargs={"fire_from_lst": False},
@@ -229,6 +232,25 @@ def run_scan(args) -> int:
     return 0
 
 
+def describe_case(case) -> str:
+    """Ringkas bukti satu kasus: titik api, kemenetapan NDVI, dan catatan agen."""
+    ev = case.evidence
+    parts = []
+    fires = [v.get("fire_fraction") for k, v in ev.items() if k.startswith("thermal_r") and v.get("fire_fraction")]
+    if fires:
+        parts.append(f"api {max(fires):.0%} area")
+    drops = [v["ndvi_drop"] for k, v in ev.items() if k.startswith("persist_r")]
+    if drops:
+        parts.append("NDVI turun " + "/".join(f"{d:.2f}" for d in drops))
+    if "jalur_cepat" in ev:
+        parts.append("jalur cepat kebakaran")
+    if "catatan" in ev:
+        parts.append(ev["catatan"])
+    if case.status == "dismissed" and drops and max(drops) < 0.1:
+        parts.append("NDVI pulih -> alarm palsu")
+    return "; ".join(parts) or "-"
+
+
 def plot(model, env, path: Path):
     import matplotlib
 
@@ -296,6 +318,10 @@ def main(argv=None) -> int:
     print(f"  peringatan            : {len(kinds)} (api {kinds.count('fire')}, tebang liar {kinds.count('logging')}, "
           f"perlu tinjauan {kinds.count('uncertain')})")
     print(f"  hari MODIS mendeteksi titik api di area: {env.observed_fire_days() or 'tidak ada'}")
+    if cases:
+        print("\nRincian kasus (alasan keputusan agen):")
+        for c in sorted(cases, key=lambda c: c.day):
+            print(f"  {c.case_id:18s} {env.date_of(c.day)}  {c.status:10s} {str(c.cause):14s} {describe_case(c)}")
     if env.errors:
         print(f"  PERMINTAAN GAGAL ({len(env.errors)}), contoh: {env.errors[0]}")
 

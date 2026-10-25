@@ -53,6 +53,7 @@ class Case:
     det_vote: bool | None = None
     val_vote: bool | None = None
     val_received: bool = False
+    val_strong: bool = False  # True bila vonis validator didukung bukti langsung (bukan sekadar "tidak ada api")
     cause: str | None = None
     val_confidence: float = 0.0
     evidence: dict = field(default_factory=dict)
@@ -136,8 +137,10 @@ class ChangeDetectionAgent(MonitorAgent):
         fire_growth_days=5,
         min_valid_fraction=0.5,
         max_wait_days=10,
+        fire_fast_track=True,
     ):
         super().__init__(model, name)
+        self.fire_fast_track = fire_fast_track
         self.min_valid_fraction = min_valid_fraction  # porsi piksel kasus yang harus bebas awan saat cek kemenetapan
         self.max_wait_days = max_wait_days  # batas menunggu citra bersih sebelum kasus diserahkan ke manusia
         self.rows = rows  # wilayah tanggung jawab (baris citra), untuk pembagian kerja
@@ -294,6 +297,7 @@ class ChangeDetectionAgent(MonitorAgent):
             return
         case.val_vote = msg.content["real"]
         case.val_received = True
+        case.val_strong = bool(msg.content.get("strong", True))
         case.cause = msg.content["cause"]
         case.val_confidence = msg.content["confidence"]
         case.evidence[f"thermal_r{case.round}"] = {
@@ -302,14 +306,23 @@ class ChangeDetectionAgent(MonitorAgent):
         }
 
     def _try_resolve(self, case: Case):
-        if case.det_vote is None or not case.val_received:
+        if not case.val_received:
+            return
+        # Jalur cepat kebakaran: penurunan NDVI (dilihat detektor) + titik api di lokasi yang sama (dilihat
+        # validator) sudah dua bukti independen. Kebakaran tidak boleh menunggu citra bersih berhari-hari.
+        if self.fire_fast_track and case.val_vote and case.cause == "fire" and case.val_strong:
+            case.evidence["jalur_cepat"] = "penurunan NDVI dan bukti api di lokasi yang sama"
+            self._confirm(case)
+            return
+        if case.det_vote is None:
             return
         if case.det_vote and case.val_vote:
-            self.send(CONFIRM, case.validator, "consensus", {"case_id": case.case_id, "cause": case.cause}, case.case_id)
-            self._finalize(case, CONFIRMED, cause=case.cause)
-        elif case.det_vote is False and case.val_vote is False:
+            self._confirm(case)
+        elif case.det_vote is False and (case.val_vote is False or not case.val_strong):
+            # NDVI terbukti pulih. Suara validator yang lemah (mis. "tebang liar" hanya karena tidak ada api)
+            # atau tidak pasti tidak cukup untuk mengalahkan pengamatan langsung ini.
             self.send(CANCEL, case.validator, "consensus", {"case_id": case.case_id}, case.case_id)
-            self._finalize(case, DISMISSED, cause=case.cause)
+            self._finalize(case, DISMISSED, cause=case.cause if case.val_vote is False else "tidak menetap")
         else:
             case.round += 1
             if case.round > self.max_rounds:
@@ -323,6 +336,10 @@ class ChangeDetectionAgent(MonitorAgent):
                  "centroid_latlon": case.centroid, "round": case.round},
                 case.case_id,
             )
+
+    def _confirm(self, case: Case):
+        self.send(CONFIRM, case.validator, "consensus", {"case_id": case.case_id, "cause": case.cause}, case.case_id)
+        self._finalize(case, CONFIRMED, cause=case.cause)
 
     def _finalize(self, case: Case, status: str, cause: str | None):
         case.status = status
@@ -394,7 +411,7 @@ class ValidationAgent(MonitorAgent):
             if not self._validate(req):
                 req["attempts"] += 1
                 if req["attempts"] >= self.max_attempts:
-                    self._reply(req, real=None, cause="inconclusive", conf=0.0, anom=float("nan"), hot=0.0)
+                    self._reply(req, real=None, cause="inconclusive", conf=0.0, anom=float("nan"), hot=0.0, strong=False)
                 else:
                     remaining.append(req)
         self.queue = remaining
@@ -461,22 +478,24 @@ class ValidationAgent(MonitorAgent):
             conf = min(0.99, 0.6 + 0.05 * (self.cloud_anomaly - mean_anom))
             self._reply(req, False, "cloud", conf, mean_anom, hot, fire_frac)
         elif thermal_ok or fire_frac is not None:
-            # Tidak ada bukti api -> tebang liar.
-            if self.fire_from_lst and thermal_ok:
+            # Tidak ada bukti api -> tebang liar. Suara ini hanya "kuat" bila didukung tanda suhu khas tebangan
+            # (data simulasi). Pada data nyata dasarnya hanya "tidak ada api", yang bukan bukti adanya tebangan.
+            strong = self.fire_from_lst and thermal_ok
+            if strong:
                 conf = float(np.clip(1.0 - abs(mean_anom - 2.0) / 5.0, 0.5, 0.95))
             elif fire_frac is not None:
                 conf = 0.85  # api teramati dan tidak ada
             else:
                 conf = 0.6
-            self._reply(req, True, "logging", conf, mean_anom, hot, fire_frac)
+            self._reply(req, True, "logging", conf, mean_anom, hot, fire_frac, strong=strong)
         else:
             return False  # suhu dan titik api sama-sama tertutup awan -> coba lagi besok
         return True
 
-    def _reply(self, req, real, cause, conf, anom, hot, fire_frac=None):
+    def _reply(self, req, real, cause, conf, anom, hot, fire_frac=None, strong=True):
         content = {
             "case_id": req["case_id"], "round": req["round"], "day": req["day"], "real": real,
-            "cause": cause, "confidence": round(conf, 2),
+            "cause": cause, "confidence": round(conf, 2), "strong": strong,
             "mean_anomaly": None if np.isnan(anom) else round(anom, 2),
             "hot_fraction": round(hot, 2),
         }

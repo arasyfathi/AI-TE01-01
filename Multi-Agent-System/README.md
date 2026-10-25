@@ -96,7 +96,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 37 pengujian
+python -m pytest -q tests                             # 42 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
@@ -181,6 +181,26 @@ Wilayah bawaan: 10 x 10 km di sekitar Palangka Raya, Kalimantan Tengah.
   revisitnya ±5 hari sehingga logika acuan "minggu lalu" perlu diubah.
 - **Latensi**: data MODIS di GEE biasanya terlambat beberapa hari. `--latency N` menunda ketersediaan data
   agar replay lebih realistis.
+
+**Hasil uji pertama di data nyata dan perbaikannya** (area hasil `--find-fires`: -2.537, 114.587,
+23 Agustus–21 Oktober 2023, `--keep-haze`): MODIS mencatat titik api pada 25 tanggal, rata-rata hanya 21% piksel
+NDVI bebas awan per hari, dan agen membuka 7 kasus. Namun **tidak satu pun terkonfirmasi**: 6 kasus berakhir
+"perlu tinjauan". Bukti di `alerts.json` menunjukkan dua masalah pada aturan konsensus:
+- Empat kasus kebakaran sudah punya titik api 17–100% di lokasi penurunan NDVI, tetapi agen Deteksi tidak pernah
+  mendapat citra bersih untuk memastikan kehilangan vegetasi menetap, lalu menyerah setelah 10 hari.
+- Dua kasus diberi vonis "tebang liar" oleh agen Validasi hanya karena tidak ada api, padahal agen Deteksi berulang
+  kali mengukur NDVI pulih (penurunan 0,02–0,05).
+
+Aturan yang diperbaiki:
+- **Jalur cepat kebakaran**: penurunan NDVI ditambah bukti api di lokasi yang sama sudah merupakan dua bukti
+  independen, jadi kasus langsung terkonfirmasi tanpa menunggu citra bersih.
+- **Bobot suara**: agen Validasi menandai suaranya *kuat* (ada bukti langsung: titik api, atau tanda suhu khas)
+  atau *lemah* ("tebang liar" hanya karena tidak ada api). Suara lemah tidak bisa mengalahkan pengamatan bahwa NDVI
+  pulih, sehingga kasus seperti itu ditolak dan tidak dilempar ke analis.
+- **Batas tunggu citra bersih** untuk data nyata dinaikkan menjadi 20 hari (`--max-wait`).
+
+Perilaku pada data simulasi tidak berubah. Replay di area yang sama perlu dijalankan ulang untuk melihat hasilnya
+pada data nyata. Ringkasan `run_gee.py` kini mencetak alasan keputusan tiap kasus.
 
 **Status pengujian**: logika adapter, penanganan data bolong, cache, percobaan ulang, dan CLI diuji dengan GEE
 tiruan (`tests/test_gee_adapter.py`). Panggilan ke server GEE sungguhan (ekspresi citra dan `computePixels`)
