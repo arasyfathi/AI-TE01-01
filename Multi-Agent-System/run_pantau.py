@@ -85,7 +85,7 @@ def build_model(args, env) -> ForestMonitoringModel:
         },
         validator_kwargs={
             "fire_from_lst": False,
-            "fire_lookback": 1,  # periode ini dan sebelumnya
+            "fire_lookback": 2,  # sejak pengamatan acuan: bila periode lalu berawan, acuan mundur 2 periode
             "fire_buffer_px": math.ceil(375 / args.pixel),  # toleransi lokasi titik api VIIRS 375 m
         },
     )
@@ -133,16 +133,16 @@ def run_kecamatan(args, region, env=None) -> dict:
         return {"region": region.name, "ok": False}
 
     model = build_model(args, env)
-    print(f"\n{'periode':26s}{'hutan bebas awan':>18s}{'titik api':>12s}")
+    print(f"\n{'periode':26s}{'hutan bebas awan':>18s}{'titik api':>18s}")
     for day in range(1, env.n_periods + 1):
         model.step()
         cov = env.coverage(day)
         if not cov["ok"]:
             print(f"{env.label_of(day):26s}  data gagal diunduh")
             continue
-        fire = f"{cov['fire_px']} piksel" if cov["fire_data"] else "tak ada data"
+        fire = f"{cov['fire_px'] * env.ha_per_px:,.0f} ha" if cov["fire_data"] else "tak ada data"
         role = "  (acuan)" if day <= 2 else ""
-        print(f"{env.label_of(day):26s}{cov['clear_ha']:>15,.0f} ha{fire:>12s}{role}")
+        print(f"{env.label_of(day):26s}{cov['clear_ha']:>15,.0f} ha{fire:>18s}{role}")
 
     out_dir = args.out / region.slug
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -169,10 +169,20 @@ def run_kecamatan(args, region, env=None) -> dict:
     n = lambda s: sum(c.status == s for c in cases)  # noqa: E731
     print(f"\nKasus: {len(cases)} (terkonfirmasi {n(CONFIRMED)}, ditolak {n(DISMISSED)}, "
           f"perlu tinjauan {n(UNCERTAIN)}, menunggu periode berikutnya {len(pending)})")
-    for c in cases:
+    def line(c):
         lat, lon = c.centroid
-        print(f"  {env.label_of(c.day):26s} {c.status:10s} {str(c.cause):14s} ({lat:.4f}, {lon:.4f}) "
-              f"{c.area_px * env.ha_per_px:6.1f} ha  {describe_case(c)}")
+        return (f"  {env.label_of(c.day):26s} {c.status:10s} {str(c.cause):14s} ({lat:.4f}, {lon:.4f}) "
+                f"{c.area_px * env.ha_per_px:7.1f} ha  {describe_case(c)}")
+
+    for c in cases:
+        if c.status != PENDING:
+            print(line(c))
+    if pending:
+        biggest = sorted(pending, key=lambda c: -c.area_px)[:10]
+        print(f"  ... {len(pending)} wilayah menunggu periode berikutnya"
+              + (f"; {len(biggest)} terluas:" if len(pending) > len(biggest) else ":"))
+        for c in biggest:
+            print(line(c))
 
     print(f"\nPERINGATAN BARU: {len(new_alerts)}" + ("" if new_alerts else " (tidak ada)"))
     for e in new_alerts:
@@ -257,7 +267,7 @@ def run_status(args) -> int:
     today = dt.date.today()
     labels = {S2: "Sentinel-2 (NDVI)", CLOUD_SCORE: "Cloud Score+ (masker awan)"}
     for cid, latest in status.items():
-        label = labels.get(cid, f"Titik api VIIRS {cid.split('/')[2]}")
+        label = labels[cid] if cid in labels else f"Titik api VIIRS {cid.split('/')[-2]}"
         if latest and not latest.startswith("GAGAL"):
             age = (today - dt.date.fromisoformat(latest)).days
             warn = "" if age <= 10 else "  <- tidak diperbarui lebih dari 10 hari"

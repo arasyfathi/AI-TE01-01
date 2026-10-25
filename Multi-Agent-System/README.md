@@ -96,7 +96,7 @@ python run_simulation.py                              # 120 hari, seed 42
 python run_simulation.py --compare                    # MAS vs detektor tunggal
 python run_simulation.py --detectors 3 --validators 2 # lebih banyak agen
 python run_simulation.py --days 180 --seed 7 --quiet
-python -m pytest -q tests                             # 55 pengujian
+python -m pytest -q tests                             # 57 pengujian
 ```
 
 Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.

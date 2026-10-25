@@ -60,6 +60,11 @@ class FakeSentinel(SentinelEnvironment):
                 ndvi[r0:r1, c0:c1] = 0.30 if kind == "logging" else 0.25
             if kind == "fire" and p == ep:
                 fire[max(0, r0 - 6):r1 + 6, max(0, c0 - 6):c1 + 6] = 1.0  # piksel VIIRS 375 m, berblok
+            if kind == "fire_late":  # api terdeteksi pada ep, bekas terbakar baru terlihat 2 periode kemudian
+                if p >= ep + 2:
+                    ndvi[r0:r1, c0:c1] = 0.25
+                if p == ep:
+                    fire[max(0, r0 - 6):r1 + 6, max(0, c0 - 6):c1 + 6] = 1.0
             if kind == "haze" and p == ep:
                 ndvi[r0:r1, c0:c1] = 0.55  # kabut tipis: turun sementara
             if kind == "cloud" and p == ep:
@@ -269,3 +274,51 @@ def test_cli_list_and_bad_name(capsys):
     assert "Batu Ampar" in capsys.readouterr().out
     assert run_pantau.main(["--kecamatan", "sungai"]) == 1
     assert "beberapa kecamatan" in capsys.readouterr().out
+
+
+def test_burn_scar_after_cloudy_period_is_fire_not_logging(tmp_path, capsys):
+    """Seperti Rasau Jaya Agustus-Oktober 2026: titik api pada periode 1, periode 2 tertutup awan total,
+    bekas terbakar baru terlihat pada periode 3. Dulu dicap 'tebang liar' karena titik api di luar jangkauan."""
+    region = square_region()
+    probe = SentinelEnvironment(region, cache_dir=None, end_date=END)
+    world = absolute([("fire_late", 1, 40, 60, 40, 60), ("cloud", 2, 0, 999, 0, 999)], probe)
+    run_pantau.run_kecamatan(args_for(tmp_path), region, FakeSentinel(region, world))
+    hist = json.loads((tmp_path / region.slug / "riwayat_peringatan.json").read_text())
+    assert [h["kind"] for h in hist] == ["fire"] and hist[0]["scene_day"] == 3
+
+    # kontrol: dengan jangkauan titik api hanya 1 periode, bekas terbakar salah dicap tebang liar
+    orig = run_pantau.build_model
+
+    def short_lookback(args, env):
+        model = orig(args, env)
+        for v in model.validators:
+            v.fire_lookback = 1
+        return model
+
+    run_pantau.build_model = short_lookback
+    try:
+        out = tmp_path / "kontrol"
+        run_pantau.run_kecamatan(run_pantau.parse_args(["--out", str(out), "--quiet", "--end-date", END]),
+                                 region, FakeSentinel(region, world))
+    finally:
+        run_pantau.build_model = orig
+    capsys.readouterr()
+    assert all(c["kind"] != "fire" for c in json.loads((out / region.slug / "riwayat_peringatan.json").read_text()))
+
+
+def test_cli_status(monkeypatch, capsys):
+    def env_with_status(args, region):
+        env = SentinelEnvironment(region, cache_dir=None, end_date=END)
+        env.status = lambda: {
+            "COPERNICUS/S2_SR_HARMONIZED": "2026-10-22",
+            "GOOGLE/CLOUD_SCORE_PLUS/V1/S2_HARMONIZED": "2026-10-22",
+            "NASA/LANCE/SNPP_VIIRS/C2": "2026-10-19",
+            "NASA/LANCE/NOAA20_VIIRS/C2": "2026-09-13",
+        }
+        return env
+
+    monkeypatch.setattr(run_pantau, "make_env", env_with_status)
+    assert run_pantau.main(["--status", "--project", "p"]) == 0
+    out = capsys.readouterr().out
+    assert "Sentinel-2 (NDVI)" in out and "Titik api VIIRS SNPP_VIIRS" in out and "Titik api VIIRS NOAA20_VIIRS" in out
+    assert "tidak diperbarui lebih dari 10 hari" in out  # NOAA-20 tertinggal
