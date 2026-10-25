@@ -63,7 +63,7 @@ Repositori ini menyatukan kedua konsep fundamental tersebut dalam bentuk kode ya
 
 ## 🔍 Bagian 1: Algoritma Pencarian (Search Algorithms)
 
-Modul ini tersimpan di dalam folder **[`Search_Algorithm/`](Search_Algorithm/)** dan memuat implementasi algoritma pencarian dalam berbagai bahasa pemrograman populer.
+Modul ini tersimpan di dalam folder **[`SearchAlgorithm/`](SearchAlgorithm/)** dan memuat implementasi algoritma pencarian menggunakan Python.
 
 ### 1. Uninformed Search (Pencarian Buta)
 Algoritma yang tidak memiliki informasi tambahan mengenai seberapa dekat suatu simpul (*node*) dengan tujuan di luar definisi ruang keadaan:
@@ -223,7 +223,7 @@ Sistem ini memadukan **dua teknik penalaran logis** secara harmonis:
 ```text
 AI-TE01/
 │
-├── Search_Algorithm/                       # MODUL 1: ALGORITMA PENCARIAN
+├── SearchAlgorithm/                        # MODUL 1: ALGORITMA PENCARIAN
 │   ├── A Search/                           # Implementasi Algoritma A* (Informed Search)
 │   ├── Binary_Search/                      # Implementasi Binary Search
 │   ├── Breadth_First_Search/               # Implementasi Breadth-First Search (BFS)
@@ -255,21 +255,7 @@ AI-TE01/
 
 ### 1. Menjalankan Sistem Pakar (Expert System)
 
-#### Opsi A: Antarmuka Web Interaktif (Modern CDSS Web UI)
-Cukup klik ganda (double-click) file skrip di root:
-```powershell
-.\Jalankan_Web_Sistem_Pakar.bat
-```
-Atau buka langsung file HTML di browser modern pilihan Anda:
-```
-Expert-System-Implementation-main/web-ui/index.html
-```
-Fitur Web UI CDSS:
-* **Guided Wizard** (Anamnesis terpandu step-by-step) & **Rapid Matrix** (Cheatsheet cepat 21 gejala).
-* **Live Working Memory** & **Hypothesis Tracker** (Prediksi probabilitas kecocokan diagnosis penyakit secara real-time).
-* **Ekspor Laporan PDF Medis & Riwayat Konsultasi (Local Audit Log)**.
-
-#### Opsi B: Eksekusi Binary Mandiri CLI (Tanpa Perlu Compile)
+#### Opsi A: Langsung Eksekusi Binary Mandiri (Tanpa Perlu Compile)
 Buka terminal PowerShell atau Command Prompt pada folder proyek:
 
 ```powershell
@@ -277,7 +263,7 @@ cd Expert-System-Implementation-main\Project1-SubmittedFiles
 .\expert_system.exe
 ```
 
-#### Opsi C: Kompilasi Ulang dari Sumber Kode C++
+#### Opsi B: Kompilasi Ulang dari Sumber Kode C++
 Jika ingin mengompilasi ulang kode sumber:
 
 ```powershell
@@ -295,7 +281,7 @@ g++ -std=c++17 -static Project1-A05071238.cpp -o expert_system.exe
 Untuk menguji seluruh algoritma pencarian sekaligus beserta data sampel:
 
 ```powershell
-python Search_Algorithm/run_all.py
+python SearchAlgorithm/run_all.py
 ```
 
 Output akan langsung menampilkan perbandingan indeks hasil pencarian, urutan kunjungan traversal graf (*BFS* dan *DFS*), serta penghitungan biaya jalur terpendek (*Dijkstra* dan *UCS*).
@@ -355,4 +341,4 @@ Pasien teridentifikasi memiliki gejala-gejala berikut:
 
 ## 📜 Lisensi & Etika Akademik
 
-Karya dan kode program pada repositori ini disusun untuk memenuhi kewajiban akademik mata kuliah **Kecerdasan Buatan (AI-TE01)** pada Program Studi **S1 Teknik Elektro, Universitas Telkom**. Seluruh kode dilisensikan di bawah lisensi terbuka [Apache License 2.0](Search_Algorithm/LICENSE).
+Karya dan kode program pada repositori ini disusun untuk memenuhi kewajiban akademik mata kuliah **Kecerdasan Buatan (AI-TE01)** pada Program Studi **S1 Teknik Elektro, Universitas Telkom**. Seluruh kode dilisensikan di bawah lisensi terbuka [Apache License 2.0](LICENSE).
