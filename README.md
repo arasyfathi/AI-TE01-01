@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <b>Implementasi Komprehensif: Algoritma Pencarian (Search Algorithms) & Sistem Pakar (Expert System)</b><br>
+  <b>Implementasi Komprehensif: Algoritma Pencarian, Sistem Pakar (Expert System) & Multi-Agent System</b><br>
   Program Studi S1 Teknik Elektro — Fakultas Teknik Elektro — Universitas Telkom
 </p>
 
@@ -31,10 +31,16 @@
    - [Metode Inferensi: Backward Chaining vs Forward Chaining](#2-metode-inferensi-backward-chaining-vs-forward-chaining)
    - [Basis Pengetahuan (Knowledge Base) Penyakit & Gejala](#3-basis-pengetahuan-knowledge-base-penyakit--gejala)
    - [Struktur & Peran Setiap File C++](#4-struktur--peran-setiap-file-c)
-5. [Struktur Direktori Repositori](#-struktur-direktori-repositori)
-6. [Panduan Eksekusi Program (How to Run)](#-panduan-eksekusi-program-how-to-run)
-7. [Contoh Output Program Sistem Pakar](#-contoh-output-program-sistem-pakar)
-8. [Lisensi & Etika Akademik](#-lisensi--etika-akademik)
+5. [Bagian 3: Multi-Agent System — Pemantau Karhutla Kubu Raya](#-bagian-3-multi-agent-system--pemantau-karhutla-kubu-raya)
+   - [Gambaran Umum](#1-gambaran-umum)
+   - [Enam Agen & Perannya](#2-enam-agen--perannya)
+   - [Komunikasi Antaragen & Konsensus](#3-komunikasi-antaragen--konsensus)
+   - [Dua Mode Lingkungan](#4-dua-mode-lingkungan)
+   - [Hasil & Keterbatasan](#5-hasil--keterbatasan)
+6. [Struktur Direktori Repositori](#-struktur-direktori-repositori)
+7. [Panduan Eksekusi Program (How to Run)](#-panduan-eksekusi-program-how-to-run)
+8. [Contoh Output Program Sistem Pakar](#-contoh-output-program-sistem-pakar)
+9. [Lisensi & Etika Akademik](#-lisensi--etika-akademik)
 
 ---
 
@@ -47,7 +53,7 @@
 | **Institusi** | Universitas Telkom |
 | **Mata Kuliah** | Kecerdasan Buatan (*Artificial Intelligence*) |
 | **Kode Kelompok** | **AI-TE01** |
-| **Cakupan Tugas** | 1. Implementasi & Komparasi *Search Algorithms*<br>2. Pengembangan *Rule-Based Medical Expert System* |
+| **Cakupan Tugas** | 1. Implementasi & Komparasi *Search Algorithms*<br>2. Pengembangan *Rule-Based Medical Expert System*<br>3. Pengembangan *Multi-Agent System* (Mesa) untuk pemantauan karhutla |
 
 ---
 
@@ -218,6 +224,118 @@ Sistem ini memadukan **dua teknik penalaran logis** secara harmonis:
 
 ---
 
+## 🛰️🔥 Bagian 3: Multi-Agent System — Pemantau Karhutla Kubu Raya
+
+> Kode lengkap, pengujian, dan dokumentasi teknis ada di [`Multi-Agent-System/`](Multi-Agent-System/README.md).
+
+### 1. Gambaran Umum
+
+*Multi-Agent System* (MAS) adalah sistem yang tersusun dari beberapa agen otonom. Tiap agen hanya melihat sebagian
+masalah, lalu mereka berkoordinasi lewat pesan untuk mencapai tujuan bersama. Pada tugas ini MAS dibangun dengan
+**[Mesa](https://github.com/mesa/mesa)** (Python) untuk **memantau kebakaran hutan dan lahan (karhutla)** dari citra
+satelit, dengan satu prinsip: **tidak ada peringatan tanpa kesepakatan dua sumber bukti yang berbeda.**
+
+- Satu sumber bukti saja mudah salah. Penurunan NDVI (kehijauan) bisa disebabkan awan, kabut, atau panen. Titik api
+  bisa berasal dari sumber panas lain.
+- Karena itu, agen yang membaca citra dan agen yang memeriksa bukti api harus **sepakat** sebelum peringatan dikirim.
+- Cakupan: satu kecamatan dalam satu waktu di **Kabupaten Kubu Raya, Kalimantan Barat** (9 kecamatan), diperbarui
+  tiap 14 hari. Sistem fokus pada kebakarannya dan tidak membedakan jenis lahan atau penyebab pembakaran.
+
+| Aspek | Pada tugas ini |
+| :--- | :--- |
+| Kerangka kerja | Mesa 3.x (`mesa.Model`, `mesa.Agent`, `DataCollector`) |
+| Jumlah agen | 6 jenis (detektor dan validator bisa lebih dari satu) |
+| Bahasa pesan | Gaya **FIPA-ACL**: `inform`, `request`, `propose`, `confirm`, `cancel` |
+| Data | Simulasi sintetis (ada *ground truth*) dan data nyata Google Earth Engine |
+| Antarmuka | Terminal dan halaman web lokal dengan peta |
+
+### 2. Enam Agen & Perannya
+
+| # | Agen | Kelas | Tugas | Tipe agen |
+| :-: | :--- | :--- | :--- | :--- |
+| 1 | **Pengunduh** | `DataIngestionAgent` | Mengambil citra periode baru dari penyimpanan/GEE, mengulang unduhan yang gagal, lalu memberi tahu agen lain. | *Simple reflex* |
+| 2 | **Titik Api** | `HotspotAgent` | Peringatan dini langsung dari titik api VIIRS sampai hari ini, tanpa menunggu citra bebas awan. Titik yang bersebelahan dijadikan satu klaster. | *Simple reflex* + klaster |
+| 3 | **Deteksi Perubahan** | `ChangeDetectionAgent` | Membandingkan NDVI Sentinel-2 dengan pengamatan bersih terakhir dan mencari penurunan drastis yang menetap. Mengajukan kasus untuk divalidasi. | *Model-based* (menyimpan acuan dan riwayat kasus) |
+| 4 | **Validasi** | `ValidationAgent` | Memeriksa bukti api (titik api / anomali termal) di lokasi kasus dan memberi suara *kuat* atau *lemah*. | *Goal/utility-based* |
+| 5 | **Pengelompokan Kejadian** | `IncidentAgent` | Menyatukan bekas terbakar yang berjarak < 500 m menjadi satu kejadian dan menautkannya ke klaster titik api penyebabnya. | *Model-based* |
+| 6 | **Notifikasi** | `NotificationAgent` | Menetapkan prioritas dan kanal tujuan, mengirim peringatan, memperbarui peringatan bila area meluas, dan mencegah laporan ganda. | *Utility-based* |
+
+Urutan eksekusi pada tiap langkah Mesa: Pengunduh → Titik Api → Deteksi → Validasi → Pengelompokan → Notifikasi.
+Satu langkah = satu hari (simulasi) atau satu periode 14 hari (data Sentinel-2).
+
+### 3. Komunikasi Antaragen & Konsensus
+
+```text
+ Pengunduh ──INFORM new_scene──▶ Deteksi ──REQUEST validate──▶ Validasi
+                                    ▲                              │
+                                    └─────── PROPOSE verdict ──────┘
+                 CONFIRM / CANCEL (konsensus) ──▶ Validasi
+
+ Deteksi ──INFORM report──▶ Pengelompokan ──INFORM incident──▶ Notifikasi ──▶ Satgas Karhutla / BPBD
+ Titik Api ──INFORM hotspot──▶ Notifikasi (peringatan dini) dan Pengelompokan (penaut penyebab)
+```
+
+Setiap kasus punya `conversation_id`, sehingga seluruh percakapan agen untuk satu kasus bisa ditelusuri dari awal
+sampai akhir (tersedia di tab "Pesan antaragen" pada halaman web).
+
+**Aturan konsensus** (dua bukti independen):
+
+| Suara Deteksi (NDVI turun dan menetap?) | Suara Validasi (ada bukti api?) | Keputusan |
+| :---: | :---: | :--- |
+| ya | ya | ✅ **CONFIRMED**, peringatan dikirim |
+| tidak (NDVI pulih) | tidak / lemah | ❌ **DISMISSED** (alarm palsu: awan, kabut, panen) |
+| berbeda | berbeda | 🔁 ronde ulang dengan data periode berikutnya |
+| masih berbeda | masih berbeda | ⚠️ **UNCERTAIN**, diserahkan ke analis |
+
+**Jalur cepat kebakaran**: penurunan NDVI ditambah titik api di lokasi yang sama sudah dua bukti independen, jadi
+kasus langsung dikonfirmasi tanpa menunggu citra bersih berikutnya. Suara *lemah* (misalnya hanya "tidak ada api")
+tidak dapat mengalahkan pengamatan bahwa NDVI sudah pulih.
+
+**Dua jenis peringatan yang dikeluarkan:**
+
+| Jenis | Sumber | Prioritas | Kanal |
+| :--- | :--- | :---: | :--- |
+| Titik api aktif | Agen Titik Api (VIIRS) | DARURAT | Satgas Karhutla / BPBD |
+| Bekas terbakar terkonfirmasi | Konsensus Deteksi + Validasi, dikelompokkan Agen Pengelompokan | TINGGI | Satgas Karhutla / BPBD |
+
+### 4. Dua Mode Lingkungan
+
+| | Simulasi sintetis | Data nyata (Kubu Raya) |
+| :--- | :--- | :--- |
+| Data | Hutan 64×64 sel dengan kebakaran, tebang liar, dan awan pengecoh buatan | Sentinel-2 (NDVI 30 m, Cloud Score+) dan titik api VIIRS lewat Google Earth Engine |
+| Awan | Penurunan NDVI palsu yang harus disaring | Data bolong (NaN); agen menunggu citra bersih |
+| Ukuran kinerja | Recall, precision, akurasi penyebab, latensi (ada *ground truth*) | Belum ada *ground truth*; hasil diperiksa lewat peta dan riwayat peringatan |
+| Skrip | `run_simulation.py` | `run_pantau.py`, `web_pantau.py` |
+
+Halaman web (`web_pantau.py`) memungkinkan memilih kecamatan, menjalankan pemantauan, melihat titik api dan bekas
+terbakar pada peta satelit, lalu membuka keluaran tiap agen secara terpisah.
+
+### 5. Hasil & Keterbatasan
+
+Pada simulasi 120 hari (seed 42), konsensus dua agen dibandingkan dengan detektor tunggal:
+
+| Metrik | MAS (konsensus) | Detektor tunggal |
+| :--- | ---: | ---: |
+| Alarm palsu | **0** | 12 |
+| Recall | 1,00 | 1,00 |
+| Precision | **1,00** | 0,71 |
+| Akurasi penyebab | 1,00 | – |
+| Latensi rata-rata (hari) | 1,20 | 0,20 |
+
+Konsensus menghilangkan alarm palsu dengan harga latensi sekitar 1 hari. Pada data nyata Kubu Raya, jalur cepat
+kebakaran dan klaster titik api bekerja pada uji lapangan, tetapi:
+
+- Titik api VIIRS bukan kepastian kebakaran (sumber panas lain bisa terdeteksi), dan sistem tidak membedakan
+  pembakaran yang disengaja dari yang tidak.
+- Recall pada data nyata belum bisa dihitung. Pembanding independen yang disarankan: produk area terbakar
+  `MODIS/061/MCD64A1`.
+- Terra/Aqua (MODIS) dan Suomi NPP akan berhenti beroperasi/mengirim data sekitar akhir 2026, sehingga sumber titik
+  api perlu dipantau ulang dengan `python run_pantau.py --status`.
+- Ambang deteksi masih nilai awal dan perlu dikalibrasi pada kejadian nyata. Panggilan GEE sungguhan belum bisa diuji
+  otomatis; pengujian otomatis (65 tes) memakai data tiruan.
+
+---
+
 ## 📂 Struktur Direktori Repositori
 
 ```text
@@ -245,6 +363,22 @@ AI-TE01/
 │   │   ├── expert_system.exe               # File biner mandiri (Standalone executable)
 │   │   └── Project-1-A05071238-Bigyan.pdf  # Laporan referensi ilmiah proyek
 │   └── README.md
+│
+├── Multi-Agent-System/                     # MODUL 3: MULTI-AGENT SYSTEM (MESA)
+│   ├── deforestation_mas/                  # Paket utama: agen, pesan, model, lingkungan
+│   │   ├── agents.py                       # 6 agen + logika konsensus
+│   │   ├── messaging.py                    # MessageBus & pesan bergaya FIPA-ACL
+│   │   ├── model.py                        # mesa.Model: pipeline agen & DataCollector
+│   │   ├── environment.py                  # lingkungan satelit sintetis + ground truth
+│   │   ├── sentinel_environment.py         # data nyata: Sentinel-2 + VIIRS (periode 14 hari)
+│   │   └── gee_environment.py              # replay data MODIS dari Google Earth Engine
+│   ├── data/                               # Batas 9 kecamatan Kabupaten Kubu Raya (GeoJSON)
+│   ├── web/index.html                      # Halaman web: peta, kecamatan, keluaran tiap agen
+│   ├── run_simulation.py                   # Simulasi sintetis
+│   ├── run_pantau.py                       # Pemantauan 2 mingguan per kecamatan
+│   ├── web_pantau.py                       # Server web lokal
+│   ├── tests/                              # 65 pengujian (pytest)
+│   └── README.md                           # Dokumentasi teknis Multi-Agent System
 │
 └── README.md                               # Dokumentasi & laporan utama repositori tugas
 ```
@@ -285,6 +419,30 @@ python Search_Algorithm/run_all.py
 ```
 
 Output akan langsung menampilkan perbandingan indeks hasil pencarian, urutan kunjungan traversal graf (*BFS* dan *DFS*), serta penghitungan biaya jalur terpendek (*Dijkstra* dan *UCS*).
+
+---
+
+### 3. Menjalankan Multi-Agent System (Mesa)
+
+Prasyarat: Python 3.10+ dan `pip install -r Multi-Agent-System/requirements.txt`.
+
+```powershell
+# Simulasi sintetis (tanpa akun apa pun): MAS vs detektor tunggal
+Jalankan_Multi_Agent_System.bat
+# atau
+cd Multi-Agent-System
+python run_simulation.py --compare
+```
+
+Pemantauan data nyata Kubu Raya memerlukan akun Google Earth Engine (`earthengine authenticate` sekali saja):
+
+```powershell
+pip install -r Multi-Agent-System/requirements-gee.txt
+Buka_Web_Pantau.bat              # halaman web: http://127.0.0.1:8765
+Pantau_Kubu_Raya.bat "Sungai Raya"   # versi terminal untuk satu kecamatan
+```
+
+Detail opsi, penjadwalan otomatis, dan format keluaran ada di [`Multi-Agent-System/README.md`](Multi-Agent-System/README.md).
 
 ---
 

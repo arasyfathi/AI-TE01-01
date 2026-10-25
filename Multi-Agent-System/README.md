@@ -1,17 +1,23 @@
 # 🌳🔥 Multi-Agent Deforestation & Fire Monitoring System
 
 Sistem multi-agen (MAS) berbasis **[Mesa](https://github.com/mesa/mesa)** yang memantau citra satelit
-secara terus-menerus untuk mendeteksi **tebang liar** dan **kebakaran hutan**. Agen tidak menyimpulkan
-sendiri: setiap wilayah yang dicurigai harus disepakati (konsensus) oleh dua agen dengan sumber bukti
-berbeda sebelum peringatan dikirim ke pihak berwenang.
+secara terus-menerus untuk mendeteksi **kebakaran hutan dan lahan (karhutla)**; simulasi sintetis juga memuat
+tebang liar sebagai pembanding. Agen tidak menyimpulkan sendiri: setiap wilayah yang dicurigai harus disepakati
+(konsensus) oleh dua agen dengan sumber bukti berbeda sebelum peringatan dikirim ke pihak berwenang.
 
-> Sistem berjalan pada dua jenis data: **lingkungan satelit sintetis** yang dilengkapi *ground truth* sehingga
-> kinerjanya bisa diukur (bagian 4-5), dan **data nyata MODIS dari Google Earth Engine** dalam mode replay
-> (bagian 8).
+> Sistem berjalan pada tiga jenis data: **lingkungan satelit sintetis** yang dilengkapi *ground truth* sehingga
+> kinerjanya bisa diukur (bagian 4-5), **replay data MODIS** dari Google Earth Engine (bagian 8), dan
+> **pemantauan 2 mingguan Kabupaten Kubu Raya** dengan Sentinel-2 + VIIRS (bagian 9) yang juga tersedia sebagai
+> halaman web (bagian 10).
+>
+> Ringkasan untuk laporan ada di [README utama, Bagian 3](../README.md#-bagian-3-multi-agent-system--pemantau-karhutla-kubu-raya).
 
 ---
 
 ## 1. Peran agen
+
+Enam jenis agen. Agen Pengunduh, Deteksi Perubahan, Validasi, dan Notifikasi dipakai di semua mode; Agen Titik Api dan
+Agen Pengelompokan Kejadian dipakai pada mode 2 mingguan (Sentinel-2 + VIIRS).
 
 | Agen | Kelas | Tugas |
 | :--- | :--- | :--- |
@@ -30,6 +36,10 @@ berbeda sebelum peringatan dikirim ke pihak berwenang.
                                     └──────PROPOSE verdict─────────┘
             konsensus tercapai ──CONFIRM / CANCEL──▶ Validasi
  Deteksi ──INFORM report──▶ Notifikasi ──▶ Tim Pemadam / Polisi Hutan / Analis
+
+ Mode 2 mingguan:
+ Titik Api ──INFORM hotspot──▶ Notifikasi (DARURAT) dan Pengelompokan
+ Deteksi ──report──▶ Pengelompokan ──INFORM incident──▶ Notifikasi (TINGGI)
 ```
 
 Pesan memakai *performative* bergaya **FIPA-ACL** (`inform`, `request`, `propose`, `confirm`, `cancel`)
@@ -101,7 +111,7 @@ python run_simulation.py --days 180 --seed 7 --quiet
 python -m pytest -q tests                             # 65 pengujian
 ```
 
-Di Windows, cukup klik ganda `Jalankan_Multi-Agent-System.bat` di root repositori.
+Di Windows, cukup klik ganda `Jalankan_Multi_Agent_System.bat` di root repositori.
 Hasil tersimpan di `output/`: `alerts.json` (semua peringatan beserta bukti), `timeseries.csv`
 (data `DataCollector` Mesa per hari), dan `simulation.png`.
 
@@ -112,7 +122,7 @@ Multi-Agent-System/
 ├── deforestation_mas/
 │   ├── environment.py   # lingkungan satelit sintetis + ground truth
 │   ├── messaging.py     # MessageBus & pesan bergaya FIPA-ACL
-│   ├── agents.py        # 4 agen + logika konsensus
+│   ├── agents.py        # 6 agen + logika konsensus
 │   ├── model.py         # mesa.Model: pipeline harian & DataCollector
 │   ├── evaluation.py    # recall, precision, akurasi penyebab, latensi
 │   ├── gee_environment.py  # adapter data nyata Google Earth Engine (MODIS, replay harian)
